@@ -31,6 +31,7 @@ import json
 import argparse
 import math
 import sys
+from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -38,26 +39,19 @@ from itertools import combinations
 from collections import defaultdict
 from tqdm import tqdm
 
-try:
-    from pyhpo import Ontology, HPOSet, HPOTerm
-except ImportError:
-    sys.exit(
-        "ERROR: pyhpo is not installed.\n"
-        "Install it with:  pip install pyhpo"
-    )
-
-try:
-    from sklearn.cluster import AgglomerativeClustering
-except ImportError:
-    sys.exit(
-        "ERROR: scikit-learn is not installed.\n"
-        "Install it with:  pip install scikit-learn"
-    )
+from pyhpo import Ontology, HPOSet, HPOTerm
+from sklearn.cluster import AgglomerativeClustering
 
 
-# ---------------------------------------------------------------------------
+@dataclass
+class Sample:
+    name: str
+    terms: list[str]
+    hpo_set: HPOSet | None = field(default=None, repr=False)
+
+
 # Phenopacket parsing
-# ---------------------------------------------------------------------------
+
 
 def load_hpo_terms(filepath: Path) -> list[str]:
     """Return observed HPO term IDs from a phenopacket JSON file.
@@ -71,7 +65,6 @@ def load_hpo_terms(filepath: Path) -> list[str]:
 
     terms: list[str] = []
     for feature in data.get("phenotypicFeatures", []):
-        # Skip negated / excluded observations
         if feature.get("excluded", False) or feature.get("negated", False):
             continue
         term_id = feature.get("type", {}).get("id", "")
@@ -81,87 +74,70 @@ def load_hpo_terms(filepath: Path) -> list[str]:
     return terms
 
 
-def load_all_phenopackets(phenopacket_dir: Path) -> tuple[list[str], list[list[str]]]:
-    """Discover and load all phenopacket JSON files under *phenopacket_dir*.
-
-    Returns:
-        names     – list of phenopacket identifiers (file stem)
-        term_lists – parallel list of HPO term ID lists
-    """
+def load_all_phenopackets(phenopacket_dir: Path) -> list[Sample]:
+    """Discover and load all phenopacket JSON files under phenopacket_dir."""
     files = sorted(phenopacket_dir.rglob("*.json"))
     if not files:
         sys.exit(f"ERROR: no .json files found under {phenopacket_dir}")
 
-    names: list[str] = []
-    term_lists: list[list[str]] = []
-    skipped = 0
+    samples: list[Sample] = []
+    n_skipped = 0
 
     for f in files:
         terms = load_hpo_terms(f)
         if not terms:
-            print(f"  [skip] {f.name} — no observed HPO terms", file=sys.stderr)
-            skipped += 1
+            print(f"[skip] {f.name}: no observed HPO terms", file=sys.stderr)
+            n_skipped += 1
             continue
-        names.append(f.stem)
-        term_lists.append(terms)
+        samples.append(Sample(name=f.stem, terms=terms))
 
     print(
-        f"Loaded {len(names)} phenopackets"
-        + (f" ({skipped} skipped — no HPO terms)" if skipped else "")
+        f"Loaded {len(samples)} phenopackets"
+        + (f" ({n_skipped} skipped: no HPO terms)" if n_skipped else "")
     )
-    return names, term_lists
+    return samples
 
 
-# ---------------------------------------------------------------------------
 # HPO set construction
-# ---------------------------------------------------------------------------
 
-def build_hpo_sets(
-    term_lists: list[list[str]],
-    names: list[str],
-) -> tuple[list[str], list[HPOSet]]:
-    """Convert raw HPO ID lists into pyhpo HPOSet objects.
 
-    Terms not found in the loaded ontology are silently dropped (pyhpo raises
-    an exception for unknown IDs); phenopackets that end up with an empty set
-    after filtering are removed from the cohort.
+def build_hpo_sets(samples: list[Sample]) -> list[Sample]:
+    """Populate each sample's hpo_set after validating terms against the ontology.
+
+    Samples whose terms are all unknown to the ontology are dropped.
     """
-    valid_names: list[str] = []
-    hpo_sets: list[HPOSet] = []
+    valid: list[Sample] = []
 
-    for name, terms in zip(names, term_lists):
-        # Filter to terms that exist in the ontology
+    for sample in samples:
         valid_terms: list[str] = []
-        for t in terms:
+        for t in sample.terms:
             try:
-                Ontology.get_hpo_object(t)  # existence check
+                Ontology.get_hpo_object(t)
                 valid_terms.append(t)
             except RuntimeError:
                 print(
-                    f"  [warn] {name}: unknown HPO term {t!r} — skipped",
+                    f"[warn] {sample.name}: unknown HPO term {t!r} — skipped",
                     file=sys.stderr,
                 )
 
         if not valid_terms:
             print(
-                f"  [skip] {name} — no valid HPO terms after ontology check",
+                f"[skip] {sample.name}: no valid HPO terms after ontology check",
                 file=sys.stderr,
             )
             continue
 
-        hpo_sets.append(HPOSet.from_queries(valid_terms))
-        valid_names.append(name)
+        sample.terms = valid_terms
+        sample.hpo_set = HPOSet.from_queries(valid_terms)
+        valid.append(sample)
 
-    return valid_names, hpo_sets
+    return valid
 
 
-# ---------------------------------------------------------------------------
-# Corpus-based Information Content (optional)
-# ---------------------------------------------------------------------------
+# Corpus-based information content
 
-def compute_corpus_ic(
-    term_lists: list[list[str]],
-) -> dict[str, float]:
+
+def compute_corpus_ic(samples: list[Sample]) -> dict[str, float]:
     """Compute information content from the phenopacket corpus.
 
     For each HPO term (and all its ancestors), count how many phenopackets
@@ -175,20 +151,17 @@ def compute_corpus_ic(
     This is the standard corpus-based IC used when external annotation
     databases are not available or not desired.
     """
-    n_total = len(term_lists)
+    n_total = len(samples)
     term_freq: dict[str, int] = defaultdict(int)
 
-    for terms in term_lists:
-        # Expand each term to its full ancestor set (including itself)
+    for sample in samples:
         ancestors_union: set[str] = set()
-        for t in set(terms):
+        for t in set(sample.terms):
             try:
                 hpo_obj = Ontology.get_hpo_object(t)
             except RuntimeError:
                 continue
-            ancestors_union.update(
-                a.id for a in hpo_obj.path_to_top()
-            )
+            ancestors_union.update(a.id for a in hpo_obj.path_to_top())
         for anc in ancestors_union:
             term_freq[anc] += 1
 
@@ -202,9 +175,8 @@ def compute_corpus_ic(
     return ic
 
 
-# ---------------------------------------------------------------------------
 # BMA Resnik similarity
-# ---------------------------------------------------------------------------
+
 
 def resnik_sim_pyhpo(
     set_a: HPOSet,
@@ -214,7 +186,7 @@ def resnik_sim_pyhpo(
     """BMA Resnik similarity using pyhpo's built-in annotation-based IC."""
     return set_a.similarity(
         set_b,
-        kind=ic_source,   # "omim" | "orpha" | "decipher" | "gene"
+        kind=ic_source,  # "omim" | "orpha" | "decipher" | "gene"
         method="resnik",
         combine="BMA",
     )
@@ -235,23 +207,21 @@ def _mica_ic_corpus(
 
 
 def resnik_bma_corpus(
-    terms_a: list[str],
-    terms_b: list[str],
+    sample_a: Sample,
+    sample_b: Sample,
     corpus_ic: dict[str, float],
 ) -> float:
     """BMA Resnik similarity using corpus-derived IC values.
 
     BMA(A, B) = [ sum_a max_b sim(a,b) + sum_b max_a sim(a,b) ] / (|A| + |B|)
     """
-    hpo_a = [Ontology.get_hpo_object(t) for t in terms_a]
-    hpo_b = [Ontology.get_hpo_object(t) for t in terms_b]
+    hpo_a = [Ontology.get_hpo_object(t) for t in sample_a.terms]
+    hpo_b = [Ontology.get_hpo_object(t) for t in sample_b.terms]
 
     def one_way(source: list, target: list) -> float:
         total = 0.0
         for s in source:
-            best = max(
-                _mica_ic_corpus(s, t, corpus_ic) for t in target
-            )
+            best = max(_mica_ic_corpus(s, t, corpus_ic) for t in target)
             total += best
         return total
 
@@ -260,33 +230,33 @@ def resnik_bma_corpus(
     )
 
 
-# ---------------------------------------------------------------------------
 # Similarity matrix
-# ---------------------------------------------------------------------------
+
 
 def compute_similarity_matrix(
-    hpo_sets: list[HPOSet],
-    term_lists: list[list[str]],
+    samples: list[Sample],
     ic_source: str,
     use_corpus_ic: bool,
 ) -> np.ndarray:
     """Compute the full pairwise BMA Resnik similarity matrix (N×N)."""
-    n = len(hpo_sets)
+    n = len(samples)
     sim = np.zeros((n, n), dtype=np.float64)
 
     corpus_ic: dict[str, float] = {}
     if use_corpus_ic:
         print("Computing corpus-based information content...")
-        corpus_ic = compute_corpus_ic(term_lists)
+        corpus_ic = compute_corpus_ic(samples)
         print(f"  IC computed for {len(corpus_ic)} HPO terms")
 
     total_pairs = n * (n - 1) // 2
-    with tqdm(total=total_pairs, desc="Computing pairwise BMA Resnik similarity") as bar:
+    with tqdm(
+        total=total_pairs, desc="Computing pairwise BMA Resnik similarity"
+    ) as bar:
         for i, j in combinations(range(n), 2):
             if use_corpus_ic:
-                val = resnik_bma_corpus(term_lists[i], term_lists[j], corpus_ic)
+                val = resnik_bma_corpus(samples[i], samples[j], corpus_ic)
             else:
-                val = resnik_sim_pyhpo(hpo_sets[i], hpo_sets[j], ic_source)
+                val = resnik_sim_pyhpo(samples[i].hpo_set, samples[j].hpo_set, ic_source)
             sim[i, j] = val
             sim[j, i] = val
             bar.update(1)
@@ -300,9 +270,8 @@ def compute_similarity_matrix(
     return sim
 
 
-# ---------------------------------------------------------------------------
-# Distance conversion & clustering
-# ---------------------------------------------------------------------------
+# Distance conversion and clustering
+
 
 def sim_to_dist(sim_matrix: np.ndarray) -> np.ndarray:
     """Normalise similarity to [0, 1] then convert to distance (1 - sim_norm)."""
@@ -327,77 +296,86 @@ def cluster(dist_matrix: np.ndarray, n_clusters: int, linkage: str) -> np.ndarra
     return model.fit_predict(dist_matrix)
 
 
-# ---------------------------------------------------------------------------
 # Output
-# ---------------------------------------------------------------------------
+
 
 def save_results(
-    names: list[str],
+    samples: list[Sample],
     labels: np.ndarray,
     sim_matrix: np.ndarray,
     output_path: Path,
     save_matrix: bool,
+    n_input: int,
 ) -> None:
-    df = pd.DataFrame(
-        {
-            "phenopacket": names,
-            "cluster": labels + 1,  # 1-indexed for human readability
-        }
-    ).sort_values(["cluster", "phenopacket"]).reset_index(drop=True)
+    df = (
+        pd.DataFrame(
+            {
+                "phenopacket": [s.name for s in samples],
+                "cluster": labels + 1,  # 1-indexed for human readability
+            }
+        )
+        .sort_values(["cluster", "phenopacket"])
+        .reset_index(drop=True)
+    )
 
     df.to_csv(output_path, index=False)
-    print(f"\nCluster assignments saved to: {output_path}")
-
-    # Summary table
-    counts = df["cluster"].value_counts().sort_index()
-    print(f"\n{'Cluster':>9}  {'Count':>6}  {'Bar'}")
-    print("-" * 40)
-    max_count = counts.max()
-    bar_width = 30
-    for cid, cnt in counts.items():
-        bar = "#" * round(cnt / max_count * bar_width)
-        print(f"  ERN {cid:>2d}   {cnt:>5}  {bar}")
-
-    print(
-        f"\nTotal: {len(df)} phenopackets across {counts.nunique()} clusters "
-        f"(min={counts.min()}, max={counts.max()}, "
-        f"mean={counts.mean():.1f})"
-    )
 
     if save_matrix:
         mat_path = output_path.with_name(output_path.stem + "_similarity_matrix.csv")
-        sim_df = pd.DataFrame(sim_matrix)
-        sim_df.index = pd.Index(names)
-        sim_df.columns = pd.Index(names)
+        names = [s.name for s in samples]
+        sim_df = pd.DataFrame(sim_matrix, index=names, columns=names)
         sim_df.to_csv(mat_path)
-        print(f"Similarity matrix saved to: {mat_path}")
+
+    # Write summary log
+    counts = df["cluster"].value_counts().sort_index()
+
+    log_path = output_path.with_name(output_path.stem + "_summary.log")
+    with open(log_path, "w") as log:
+        log.write(f"Input phenopackets:  {n_input}\n")
+        log.write(f"Used in clustering:  {len(df)}\n")
+        log.write(f"Clusters:            {counts.nunique()}\n")
+        log.write(
+            f"Min / max / mean:    {counts.min()} / {counts.max()} / {counts.mean():.1f}\n"
+        )
+        log.write("\n")
+        log.write(f"{'Cluster':>9}  {'Count':>6}\n")
+        log.write("-" * 20 + "\n")
+        for cid, cnt in counts.items():
+            log.write(f"  {cid:>7}   {cnt:>5}\n")
+
+    print(f"Cluster assignments saved to: {output_path}")
+    print(f"Summary log saved to:         {log_path}")
+    if save_matrix:
+        print(f"Similarity matrix saved to:   {mat_path}")
 
 
-# ---------------------------------------------------------------------------
 # CLI
-# ---------------------------------------------------------------------------
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Cluster phenopackets into N ERN groups using BMA Resnik HPO similarity",
+        description="Cluster phenopackets into N groups using BMA Resnik HPO similarity",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--input", "-i",
+        "--input",
+        "-i",
         required=True,
         type=Path,
         metavar="DIR",
         help="Directory containing phenopacket JSON files (searched recursively)",
     )
     p.add_argument(
-        "--n-clusters", "-n",
+        "--n-clusters",
+        "-n",
         type=int,
         default=24,
         metavar="N",
-        help="Number of clusters (one per ERN)",
+        help="Number of clusters",
     )
     p.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         default=Path("clusters.csv"),
         metavar="FILE",
@@ -444,35 +422,25 @@ def main() -> None:
 
     # 2. Parse phenopackets
     print(f"\nScanning phenopackets in: {args.input}")
-    raw_names, raw_term_lists = load_all_phenopackets(args.input)
+    samples = load_all_phenopackets(args.input)
+    n_input = len(samples)
 
-    if len(raw_names) < args.n_clusters:
+    if n_input < args.n_clusters:
         sys.exit(
-            f"ERROR: only {len(raw_names)} usable phenopackets but "
+            f"ERROR: only {n_input} usable phenopackets but "
             f"{args.n_clusters} clusters were requested. "
             f"Lower --n-clusters or add more phenopackets."
         )
 
     # 3. Build HPO sets (ontology-validated); may drop further phenopackets
     print("\nBuilding HPO sets...")
-    names, hpo_sets = build_hpo_sets(raw_term_lists, raw_names)
-
-    # Keep term_lists aligned with the final validated names list
-    name_to_terms = dict(zip(raw_names, raw_term_lists))
-    term_lists_final = [name_to_terms[n] for n in names]
+    samples = build_hpo_sets(samples)
 
     # 4. Compute similarity matrix
-    print(
-        f"\nComputing {len(names)}×{len(names)} pairwise BMA Resnik similarity matrix..."
-    )
+    print(f"\nComputing {len(samples)}×{len(samples)} pairwise BMA Resnik similarity matrix...")
     ic_label = "corpus-based IC" if args.corpus_ic else f"IC source: {args.ic_source}"
     print(f"  Method: BMA Resnik ({ic_label})")
-    sim_matrix = compute_similarity_matrix(
-        hpo_sets,
-        term_lists_final,
-        args.ic_source,
-        args.corpus_ic,
-    )
+    sim_matrix = compute_similarity_matrix(samples, args.ic_source, args.corpus_ic)
 
     # 5. Convert to distance
     dist_matrix = sim_to_dist(sim_matrix)
@@ -482,7 +450,7 @@ def main() -> None:
     labels = cluster(dist_matrix, args.n_clusters, args.linkage)
 
     # 7. Save
-    save_results(names, labels, sim_matrix, args.output, args.save_matrix)
+    save_results(samples, labels, sim_matrix, args.output, args.save_matrix, n_input)
 
 
 if __name__ == "__main__":
