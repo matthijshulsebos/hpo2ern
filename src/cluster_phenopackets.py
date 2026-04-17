@@ -4,24 +4,26 @@ Cluster phenopackets into N groups using BMA Resnik HPO semantic similarity.
 
 Each phenopacket is represented by its set of HPO terms. Pairwise semantic
 similarity is computed using Best Match Average (BMA) Resnik similarity via
-the pyhpo library. Agglomerative clustering (UPGMA) partitions the cohort
-into the requested number of clusters (default: 24, one per ERN).
+the pyhpo library. Agglomerative clustering with complete linkage partitions
+the cohort into the requested number of clusters.
+
+If --n-clusters is omitted, silhouette analysis is run over --k-min..--k-max
+to select the best K automatically.
 
 Usage:
     python cluster_phenopackets.py --input /path/to/phenopackets/ [options]
 
 Options:
     --input,      -i  DIR   Directory with phenopacket JSON files (required)
-    --n-clusters, -n  INT   Number of clusters / ERNs (default: 24)
+    --n-clusters, -n  INT   Number of clusters (omit to auto-select via silhouette)
+    --k-min           INT   Minimum K for silhouette sweep (default: 2)
+    --k-max           INT   Maximum K for silhouette sweep (default: 30)
     --output,     -o  FILE  Output CSV path (default: clusters.csv)
     --ic-source       STR   IC source: omim | orpha | decipher | gene
-                            (default: omim). Use --corpus-ic to override with
-                            corpus-derived IC instead.
-    --corpus-ic         Flag: compute IC from phenopacket corpus frequencies
-                            rather than HPO annotation databases.
+                            (default: omim)
     --save-matrix       Flag: also write the full similarity matrix to CSV.
-    --linkage         STR   Agglomerative linkage: average | complete | single
-                            (default: average = UPGMA)
+    --linkage         STR   Agglomerative linkage: complete | average | single
+                            (default: complete)
 
 Dependencies (pip install):
     pyhpo scikit-learn numpy pandas tqdm
@@ -29,18 +31,17 @@ Dependencies (pip install):
 
 import json
 import argparse
-import math
 import sys
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from itertools import combinations
-from collections import defaultdict
 from tqdm import tqdm
 
-from pyhpo import Ontology, HPOSet, HPOTerm
+from pyhpo import Ontology, HPOSet
 from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics import silhouette_score
 
 
 @dataclass
@@ -116,7 +117,7 @@ def build_hpo_sets(samples: list[Sample]) -> list[Sample]:
                 valid_terms.append(t)
             except RuntimeError:
                 print(
-                    f"[warn] {sample.name}: unknown HPO term {t!r} — skipped",
+                    f"[warn] {sample.name}: unknown HPO term {t!r} skipped",
                     file=sys.stderr,
                 )
 
@@ -134,138 +135,31 @@ def build_hpo_sets(samples: list[Sample]) -> list[Sample]:
     return valid
 
 
-# Corpus-based information content
-
-
-def compute_corpus_ic(samples: list[Sample]) -> dict[str, float]:
-    """Compute information content from the phenopacket corpus.
-
-    For each HPO term (and all its ancestors), count how many phenopackets
-    annotate that term directly or via a more specific descendant.
-
-        IC(t) = -log( freq(t) / N )
-
-    where freq(t) = number of phenopackets in which t or a descendant of t
-    appears, and N = total number of phenopackets.
-
-    This is the standard corpus-based IC used when external annotation
-    databases are not available or not desired.
-    """
-    n_total = len(samples)
-    term_freq: dict[str, int] = defaultdict(int)
-
-    for sample in samples:
-        ancestors_union: set[str] = set()
-        for t in set(sample.terms):
-            try:
-                hpo_obj = Ontology.get_hpo_object(t)
-            except RuntimeError:
-                continue
-            ancestors_union.update(a.id for a in hpo_obj.path_to_top())
-        for anc in ancestors_union:
-            term_freq[anc] += 1
-
-    ic: dict[str, float] = {}
-    for term_id, freq in term_freq.items():
-        if freq > 0:
-            ic[term_id] = -math.log(freq / n_total)
-        else:
-            ic[term_id] = 0.0
-
-    return ic
-
-
-# BMA Resnik similarity
-
-
-def resnik_sim_pyhpo(
-    set_a: HPOSet,
-    set_b: HPOSet,
-    ic_source: str,
-) -> float:
-    """BMA Resnik similarity using pyhpo's built-in annotation-based IC."""
-    return set_a.similarity(
-        set_b,
-        kind=ic_source,  # "omim" | "orpha" | "decipher" | "gene"
-        method="resnik",
-        combine="BMA",
-    )
-
-
-def _mica_ic_corpus(
-    term_a: HPOTerm,
-    term_b: HPOTerm,
-    corpus_ic: dict[str, float],
-) -> float:
-    """IC of the Most Informative Common Ancestor for corpus-based IC."""
-    ancestors_a = {a.id for a in term_a.path_to_top()}
-    ancestors_b = {b.id for b in term_b.path_to_top()}
-    common = ancestors_a & ancestors_b
-    if not common:
-        return 0.0
-    return max(corpus_ic.get(t, 0.0) for t in common)
-
-
-def resnik_bma_corpus(
-    sample_a: Sample,
-    sample_b: Sample,
-    corpus_ic: dict[str, float],
-) -> float:
-    """BMA Resnik similarity using corpus-derived IC values.
-
-    BMA(A, B) = [ sum_a max_b sim(a,b) + sum_b max_a sim(a,b) ] / (|A| + |B|)
-    """
-    hpo_a = [Ontology.get_hpo_object(t) for t in sample_a.terms]
-    hpo_b = [Ontology.get_hpo_object(t) for t in sample_b.terms]
-
-    def one_way(source: list, target: list) -> float:
-        total = 0.0
-        for s in source:
-            best = max(_mica_ic_corpus(s, t, corpus_ic) for t in target)
-            total += best
-        return total
-
-    return (one_way(hpo_a, hpo_b) + one_way(hpo_b, hpo_a)) / (
-        len(hpo_a) + len(hpo_b)
-    )
-
-
 # Similarity matrix
 
 
 def compute_similarity_matrix(
     samples: list[Sample],
     ic_source: str,
-    use_corpus_ic: bool,
 ) -> np.ndarray:
     """Compute the full pairwise BMA Resnik similarity matrix (N×N)."""
     n = len(samples)
     sim = np.zeros((n, n), dtype=np.float64)
 
-    corpus_ic: dict[str, float] = {}
-    if use_corpus_ic:
-        print("Computing corpus-based information content...")
-        corpus_ic = compute_corpus_ic(samples)
-        print(f"  IC computed for {len(corpus_ic)} HPO terms")
-
     total_pairs = n * (n - 1) // 2
-    with tqdm(
-        total=total_pairs, desc="Computing pairwise BMA Resnik similarity"
-    ) as bar:
+    with tqdm(total=total_pairs, desc="Computing pairwise BMA Resnik similarity") as bar:
         for i, j in combinations(range(n), 2):
-            if use_corpus_ic:
-                val = resnik_bma_corpus(samples[i], samples[j], corpus_ic)
-            else:
-                val = resnik_sim_pyhpo(samples[i].hpo_set, samples[j].hpo_set, ic_source)
+            val = samples[i].hpo_set.similarity(
+                samples[j].hpo_set,
+                kind=ic_source,
+                method="resnik",
+                combine="BMA",
+            )
             sim[i, j] = val
             sim[j, i] = val
             bar.update(1)
 
-    # Self-similarity on the diagonal: use the max off-diagonal value
-    # so that clustering treats self as the most similar possible point.
-    max_off = sim.max()
-    diag_val = max_off if max_off > 0 else 1.0
-    np.fill_diagonal(sim, diag_val)
+    np.fill_diagonal(sim, 1.0)
 
     return sim
 
@@ -274,7 +168,7 @@ def compute_similarity_matrix(
 
 
 def sim_to_dist(sim_matrix: np.ndarray) -> np.ndarray:
-    """Normalise similarity to [0, 1] then convert to distance (1 - sim_norm)."""
+    """Convert Resnik similarity to distance: dist = 1 - sim_norm."""
     max_val = sim_matrix.max()
     if max_val == 0:
         sys.exit(
@@ -296,6 +190,25 @@ def cluster(dist_matrix: np.ndarray, n_clusters: int, linkage: str) -> np.ndarra
     return model.fit_predict(dist_matrix)
 
 
+def select_k_by_silhouette(
+    dist_matrix: np.ndarray,
+    linkage: str,
+    k_min: int,
+    k_max: int,
+) -> tuple[int, list[tuple[int, float]]]:
+    """Sweep K from k_min to k_max and return the K with the highest silhouette score."""
+    scores: list[tuple[int, float]] = []
+
+    for k in tqdm(range(k_min, k_max + 1), desc="Silhouette sweep"):
+        labels = cluster(dist_matrix, k, linkage)
+        score = silhouette_score(dist_matrix, labels, metric="precomputed")
+        scores.append((k, score))
+
+    best_k, best_score = max(scores, key=lambda x: x[1])
+    print(f"  Best K={best_k} (silhouette={best_score:.4f})")
+    return best_k, scores
+
+
 # Output
 
 
@@ -306,6 +219,7 @@ def save_results(
     output_path: Path,
     save_matrix: bool,
     n_input: int,
+    silhouette_scores: list[tuple[int, float]] | None = None,
 ) -> None:
     df = (
         pd.DataFrame(
@@ -326,7 +240,6 @@ def save_results(
         sim_df = pd.DataFrame(sim_matrix, index=names, columns=names)
         sim_df.to_csv(mat_path)
 
-    # Write summary log
     counts = df["cluster"].value_counts().sort_index()
 
     log_path = output_path.with_name(output_path.stem + "_summary.log")
@@ -343,6 +256,15 @@ def save_results(
         for cid, cnt in counts.items():
             log.write(f"  {cid:>7}   {cnt:>5}\n")
 
+        if silhouette_scores:
+            log.write("\n")
+            log.write("Silhouette sweep:\n")
+            log.write(f"{'K':>5}  {'Silhouette':>10}\n")
+            log.write("-" * 20 + "\n")
+            for k, score in silhouette_scores:
+                marker = " *" if k == counts.nunique() else ""
+                log.write(f"  {k:>3}   {score:>10.4f}{marker}\n")
+
     print(f"Cluster assignments saved to: {output_path}")
     print(f"Summary log saved to:         {log_path}")
     if save_matrix:
@@ -354,60 +276,40 @@ def save_results(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Cluster phenopackets into N groups using BMA Resnik HPO similarity",
+        description="Cluster phenopackets using BMA Resnik HPO similarity",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--input",
-        "-i",
-        required=True,
-        type=Path,
-        metavar="DIR",
+        "--input", "-i", required=True, type=Path, metavar="DIR",
         help="Directory containing phenopacket JSON files (searched recursively)",
     )
     p.add_argument(
-        "--n-clusters",
-        "-n",
-        type=int,
-        default=24,
-        metavar="N",
-        help="Number of clusters",
+        "--n-clusters", "-n", type=int, default=None, metavar="N",
+        help="Number of clusters (omit to auto-select via silhouette analysis)",
     )
     p.add_argument(
-        "--output",
-        "-o",
-        type=Path,
-        default=Path("clusters.csv"),
-        metavar="FILE",
+        "--k-min", type=int, default=2, metavar="N",
+        help="Minimum K for silhouette sweep (ignored when --n-clusters is set)",
+    )
+    p.add_argument(
+        "--k-max", type=int, default=30, metavar="N",
+        help="Maximum K for silhouette sweep (ignored when --n-clusters is set)",
+    )
+    p.add_argument(
+        "--output", "-o", type=Path, default=Path("clusters.csv"), metavar="FILE",
         help="Output CSV file",
     )
     p.add_argument(
-        "--ic-source",
-        choices=["omim", "orpha", "decipher", "gene"],
-        default="omim",
-        help=(
-            "Information content source for Resnik similarity "
-            "(ignored when --corpus-ic is set)"
-        ),
+        "--ic-source", choices=["omim", "orpha", "decipher", "gene"], default="omim",
+        help="Information content source for Resnik similarity",
     )
     p.add_argument(
-        "--corpus-ic",
-        action="store_true",
-        help=(
-            "Derive IC from term frequencies in the phenopacket corpus "
-            "instead of HPO annotation databases"
-        ),
-    )
-    p.add_argument(
-        "--save-matrix",
-        action="store_true",
+        "--save-matrix", action="store_true",
         help="Also write the N×N similarity matrix to CSV",
     )
     p.add_argument(
-        "--linkage",
-        choices=["average", "complete", "single"],
-        default="average",
-        help="Agglomerative clustering linkage strategy (average = UPGMA)",
+        "--linkage", choices=["complete", "average", "single"], default="complete",
+        help="Agglomerative linkage strategy",
     )
     return p.parse_args()
 
@@ -425,7 +327,7 @@ def main() -> None:
     samples = load_all_phenopackets(args.input)
     n_input = len(samples)
 
-    if n_input < args.n_clusters:
+    if args.n_clusters is not None and n_input < args.n_clusters:
         sys.exit(
             f"ERROR: only {n_input} usable phenopackets but "
             f"{args.n_clusters} clusters were requested. "
@@ -436,21 +338,29 @@ def main() -> None:
     print("\nBuilding HPO sets...")
     samples = build_hpo_sets(samples)
 
-    # 4. Compute similarity matrix
+    # 4. Compute similarity and distance matrices
     print(f"\nComputing {len(samples)}×{len(samples)} pairwise BMA Resnik similarity matrix...")
-    ic_label = "corpus-based IC" if args.corpus_ic else f"IC source: {args.ic_source}"
-    print(f"  Method: BMA Resnik ({ic_label})")
-    sim_matrix = compute_similarity_matrix(samples, args.ic_source, args.corpus_ic)
-
-    # 5. Convert to distance
+    print(f"  IC source: {args.ic_source}")
+    sim_matrix = compute_similarity_matrix(samples, args.ic_source)
     dist_matrix = sim_to_dist(sim_matrix)
 
-    # 6. Cluster
-    print(f"\nClustering into {args.n_clusters} groups (linkage={args.linkage})...")
-    labels = cluster(dist_matrix, args.n_clusters, args.linkage)
+    # 5. Select K via silhouette sweep if not specified
+    silhouette_scores: list[tuple[int, float]] | None = None
+    if args.n_clusters is None:
+        k_max = min(args.k_max, len(samples) - 1)
+        print(f"\nNo --n-clusters given; running silhouette sweep (K={args.k_min}..{k_max})...")
+        n_clusters, silhouette_scores = select_k_by_silhouette(
+            dist_matrix, args.linkage, args.k_min, k_max
+        )
+    else:
+        n_clusters = args.n_clusters
+
+    # 6. Cluster with chosen K
+    print(f"\nClustering into {n_clusters} groups (linkage={args.linkage})...")
+    labels = cluster(dist_matrix, n_clusters, args.linkage)
 
     # 7. Save
-    save_results(samples, labels, sim_matrix, args.output, args.save_matrix, n_input)
+    save_results(samples, labels, sim_matrix, args.output, args.save_matrix, n_input, silhouette_scores)
 
 
 if __name__ == "__main__":
