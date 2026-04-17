@@ -19,8 +19,10 @@ Options:
     --k-min           INT   Minimum K for silhouette sweep (default: 2)
     --k-max           INT   Maximum K for silhouette sweep (default: 30)
     --output,     -o  FILE  Output CSV path (default: clusters.csv)
-    --ic-source       STR   IC source: omim | orpha | decipher | gene
-                            (default: omim)
+    --ic-source       STR   IC source: omim | orpha | decipher | gene | corpus
+                            (default: omim; corpus uses your phenopackets)
+    --sim-method      STR   Similarity method: resnik | lin | jc | graphic
+                            (default: resnik)
     --save-matrix       Flag: also write the full similarity matrix to CSV.
     --linkage         STR   Agglomerative linkage: complete | average | single
                             (default: complete)
@@ -135,24 +137,60 @@ def build_hpo_sets(samples: list[Sample]) -> list[Sample]:
     return valid
 
 
+# Corpus IC
+
+
+def inject_corpus_ic(samples: list[Sample]) -> None:
+    """Compute IC from the phenopacket corpus and inject into the ontology.
+
+    For each term, count how many samples have it (or any descendant), propagated
+    upward through all ancestors. IC(t) = -log(count(t) / N).
+    Terms unobserved in the corpus are skipped (left at their default IC).
+    """
+    from collections import Counter
+    import math
+
+    n = len(samples)
+    counts: Counter = Counter()
+
+    for sample in samples:
+        seen = set()
+        for term in sample.hpo_set:
+            for ancestor in term.all_parents:
+                seen.add(ancestor.id)
+            seen.add(term.id)
+        counts.update(seen)
+
+    for term_id, count in counts.items():
+        try:
+            term = Ontology.get_hpo_object(term_id)
+            ic = -math.log(count / n)
+            term.information_content.set_custom("corpus", ic)
+        except RuntimeError:
+            pass
+
+    print(f"  Corpus IC computed for {len(counts)} terms across {n} samples.")
+
+
 # Similarity matrix
 
 
 def compute_similarity_matrix(
     samples: list[Sample],
     ic_source: str,
+    sim_method: str,
 ) -> np.ndarray:
-    """Compute the full pairwise BMA Resnik similarity matrix (N×N)."""
+    """Compute the full pairwise BMA similarity matrix (N×N)."""
     n = len(samples)
     sim = np.zeros((n, n), dtype=np.float64)
 
     total_pairs = n * (n - 1) // 2
-    with tqdm(total=total_pairs, desc="Computing pairwise BMA Resnik similarity") as bar:
+    with tqdm(total=total_pairs, desc=f"Computing pairwise BMA {sim_method} similarity") as bar:
         for i, j in combinations(range(n), 2):
             val = samples[i].hpo_set.similarity(
                 samples[j].hpo_set,
                 kind=ic_source,
-                method="resnik",
+                method=sim_method,
                 combine="BMA",
             )
             sim[i, j] = val
@@ -300,8 +338,12 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV file",
     )
     p.add_argument(
-        "--ic-source", choices=["omim", "orpha", "decipher", "gene"], default="omim",
-        help="Information content source for Resnik similarity",
+        "--ic-source", choices=["omim", "orpha", "decipher", "gene", "corpus"], default="omim",
+        help="Information content source for similarity; 'corpus' computes IC from your phenopackets",
+    )
+    p.add_argument(
+        "--sim-method", choices=["resnik", "lin", "jc", "graphic"], default="resnik",
+        help="Semantic similarity method",
     )
     p.add_argument(
         "--save-matrix", action="store_true",
@@ -338,13 +380,19 @@ def main() -> None:
     print("\nBuilding HPO sets...")
     samples = build_hpo_sets(samples)
 
-    # 4. Compute similarity and distance matrices
-    print(f"\nComputing {len(samples)}×{len(samples)} pairwise BMA Resnik similarity matrix...")
-    print(f"  IC source: {args.ic_source}")
-    sim_matrix = compute_similarity_matrix(samples, args.ic_source)
+    # 4. Optionally compute corpus IC and inject into the ontology
+    if args.ic_source == "corpus":
+        print("\nComputing corpus-based IC from phenopackets...")
+        inject_corpus_ic(samples)
+
+    # 5. Compute similarity and distance matrices
+    print(f"\nComputing {len(samples)}×{len(samples)} pairwise BMA similarity matrix...")
+    print(f"  IC source:  {args.ic_source}")
+    print(f"  Method:     {args.sim_method}")
+    sim_matrix = compute_similarity_matrix(samples, args.ic_source, args.sim_method)
     dist_matrix = sim_to_dist(sim_matrix)
 
-    # 5. Select K via silhouette sweep if not specified
+    # 6. Select K via silhouette sweep if not specified
     silhouette_scores: list[tuple[int, float]] | None = None
     if args.n_clusters is None:
         k_max = min(args.k_max, len(samples) - 1)
@@ -355,11 +403,11 @@ def main() -> None:
     else:
         n_clusters = args.n_clusters
 
-    # 6. Cluster with chosen K
+    # 7. Cluster with chosen K
     print(f"\nClustering into {n_clusters} groups (linkage={args.linkage})...")
     labels = cluster(dist_matrix, n_clusters, args.linkage)
 
-    # 7. Save
+    # 8. Save
     save_results(samples, labels, sim_matrix, args.output, args.save_matrix, n_input, silhouette_scores)
 
 
