@@ -1,249 +1,200 @@
 #!/usr/bin/env python3
 """
-Cluster phenopackets into N groups using BMA Resnik HPO semantic similarity.
+Cluster phenopackets using ontology-propagated binary HPO vectors + Jaccard K-Means.
 
-Each phenopacket is represented by its set of HPO terms. Pairwise semantic
-similarity is computed using Best Match Average (BMA) Resnik similarity via
-the pyhpo library. Agglomerative clustering with complete linkage partitions
-the cohort into the requested number of clusters.
+Each patient is represented as a sparse binary vector over every HPO term
+present in the cohort (direct annotations + all ontology ancestors). Jaccard
+distance naturally up-weights rare, specific terms without an explicit IC
+calculation. UMAP with Jaccard metric projects the sparse binary matrix into a
+dense low-dimensional space for K-Means clustering and 2-D visualisation.
 
-If --n-clusters is omitted, silhouette analysis is run over --k-min..--k-max
-to select the best K automatically.
+OMIM diseases are projected into the same UMAP space as a reference background,
+and the top closest OMIM diseases per cluster are reported in the summary.
+
+NOTE on cluster count: silhouette analysis maximises compactness + separation
+and typically selects a small K (broad groups). Use --n-clusters to specify
+a domain-informed K, or lower --n-neighbors to expose finer local structure.
 
 Usage:
-    python cluster_phenopackets.py --input /path/to/phenopackets/ [options]
+    python embedding_cluster_phenopackets.py --input /path/to/phenopackets/ [options]
 
 Options:
-    --input,      -i  DIR   Directory with phenopacket JSON files (required)
-    --n-clusters, -n  INT   Number of clusters (omit to auto-select via silhouette)
-    --k-min           INT   Minimum K for silhouette sweep (default: 2)
-    --k-max           INT   Maximum K for silhouette sweep (default: 30)
-    --output,     -o  FILE  Output CSV path (default: clusters.csv)
-    --ic-source       STR   IC source: omim | orpha | decipher | gene | corpus
-                            (default: omim; corpus uses your phenopackets)
-    --sim-method      STR   Similarity method: resnik | lin | jc | graphic
-                            (default: resnik)
-    --save-matrix       Flag: also write the full similarity matrix to CSV.
-    --linkage         STR   Agglomerative linkage: complete | average | single
-                            (default: complete)
+    --input,          -i  DIR   Directory with phenopacket JSON files (required)
+    --n-clusters,     -n  INT   Number of clusters (omit to auto-select via silhouette)
+    --k-min               INT   Minimum K for silhouette sweep (default: 2)
+    --k-max               INT   Maximum K for silhouette sweep (default: 30)
+    --output,         -o  FILE  Output CSV path (default: clusters_embed.csv)
+    --umap-components     INT   UMAP dimensions used for clustering (default: 25)
+    --n-neighbors         INT   UMAP neighbourhood size; lower = more local structure
+                                and more potential clusters (default: 15)
+    --min-dist          FLOAT   UMAP minimum distance; lower = tighter packing (default: 0.1)
+    --top-terms           INT   Top HPO terms to show per cluster in summary (default: 15)
+    --top-omim            INT   Top OMIM disease matches to show per cluster (default: 10)
+    --save-matrix               Write the N×N Jaccard-distance matrix to CSV
+    --save-embeddings           Write the N×D UMAP cluster-embedding matrix to CSV
+    --save-plot                 Save a 2-D UMAP scatter plot with OMIM disease background
 
 Dependencies (pip install):
-    pyhpo scikit-learn numpy pandas tqdm
+    pyhpo umap-learn scikit-learn scipy numpy pandas tqdm matplotlib
 """
 
-import json
-import argparse
+import os
 import sys
-from dataclasses import dataclass, field
+import warnings
+from pathlib import Path
+
+# Suppress cosmetic runtime messages before any heavy imports
+os.environ.setdefault("OMP_DISPLAY_ENV", "FALSE")
+os.environ.setdefault("KMP_WARNINGS", "FALSE")
+warnings.filterwarnings("ignore", category=UserWarning, module="umap")
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from itertools import combinations
+from scipy.sparse import csr_matrix
 from tqdm import tqdm
 
-from pyhpo import Ontology, HPOSet
-from sklearn.cluster import AgglomerativeClustering
+from pyhpo import Ontology
+from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-
-@dataclass
-class Sample:
-    name: str
-    terms: list[str]
-    hpo_set: HPOSet | None = field(default=None, repr=False)
+from phenopackets import Sample, build_ancestry_matrix
 
 
-# Phenopacket parsing
+# OMIM diseases
 
 
-def load_hpo_terms(filepath: Path) -> list[str]:
-    """Return observed HPO term IDs from a phenopacket JSON file.
+def load_omim_diseases(
+    vocabulary: list[str],
+) -> tuple[list[str], list[str], csr_matrix]:
+    """Build binary HPO vectors for all OMIM diseases restricted to the patient vocabulary.
 
-    Handles both Phenopackets v1 and v2 schemas:
-      v1: phenotypicFeatures[].type.id  (negated via .negated)
-      v2: phenotypicFeatures[].type.id  (negated via .excluded)
+    Returns (disease_ids, disease_names, X_disease) where X_disease is (D × V).
+    Only diseases with ≥2 terms in the patient vocabulary are included.
     """
-    with open(filepath) as fh:
-        data = json.load(fh)
+    print("Loading OMIM disease HPO annotations from ontology...")
+    raw_diseases: dict[int, object] = {}
+    for term in Ontology:
+        for d in term.omim_diseases:
+            raw_diseases[d.id] = d
 
-    terms: list[str] = []
-    for feature in data.get("phenotypicFeatures", []):
-        if feature.get("excluded", False) or feature.get("negated", False):
-            continue
-        term_id = feature.get("type", {}).get("id", "")
-        if term_id.startswith("HP:"):
-            terms.append(term_id)
+    vocab_set = set(vocabulary)
+    idx = {t: i for i, t in enumerate(vocabulary)}
+    V = len(vocabulary)
 
-    return terms
+    disease_ids: list[str] = []
+    disease_names: list[str] = []
+    rows, cols = [], []
+    d_row = 0
 
-
-def load_all_phenopackets(phenopacket_dir: Path) -> list[Sample]:
-    """Discover and load all phenopacket JSON files under phenopacket_dir."""
-    files = sorted(phenopacket_dir.rglob("*.json"))
-    if not files:
-        sys.exit(f"ERROR: no .json files found under {phenopacket_dir}")
-
-    samples: list[Sample] = []
-    n_skipped = 0
-
-    for f in files:
-        terms = load_hpo_terms(f)
-        if not terms:
-            print(f"[skip] {f.name}: no observed HPO terms", file=sys.stderr)
-            n_skipped += 1
-            continue
-        samples.append(Sample(name=f.stem, terms=terms))
-
-    print(
-        f"Loaded {len(samples)} phenopackets"
-        + (f" ({n_skipped} skipped: no HPO terms)" if n_skipped else "")
-    )
-    return samples
-
-
-# HPO set construction
-
-
-def build_hpo_sets(samples: list[Sample]) -> list[Sample]:
-    """Populate each sample's hpo_set after validating terms against the ontology.
-
-    Samples whose terms are all unknown to the ontology are dropped.
-    """
-    valid: list[Sample] = []
-
-    for sample in samples:
-        valid_terms: list[str] = []
-        for t in sample.terms:
+    for did, disease in raw_diseases.items():
+        term_set: set[str] = set()
+        for hpo_int in disease.hpo:
             try:
-                Ontology.get_hpo_object(t)
-                valid_terms.append(t)
+                term = Ontology.get_hpo_object(hpo_int)
+                if term.id in vocab_set:
+                    term_set.add(term.id)
+                for ancestor in term.all_parents:
+                    if ancestor.id in vocab_set:
+                        term_set.add(ancestor.id)
             except RuntimeError:
-                print(
-                    f"[warn] {sample.name}: unknown HPO term {t!r} skipped",
-                    file=sys.stderr,
-                )
+                pass
 
-        if not valid_terms:
-            print(
-                f"[skip] {sample.name}: no valid HPO terms after ontology check",
-                file=sys.stderr,
-            )
+        if len(term_set) < 2:
             continue
 
-        sample.terms = valid_terms
-        sample.hpo_set = HPOSet.from_queries(valid_terms)
-        valid.append(sample)
+        for t in term_set:
+            rows.append(d_row)
+            cols.append(idx[t])
 
-    return valid
+        disease_ids.append(f"OMIM:{did}")
+        disease_names.append(disease.name)
+        d_row += 1
 
-
-# Corpus IC
-
-
-def inject_corpus_ic(samples: list[Sample]) -> None:
-    """Compute IC from the phenopacket corpus and inject into the ontology.
-
-    For each term, count how many samples have it (or any descendant), propagated
-    upward through all ancestors. IC(t) = -log(count(t) / N).
-    Terms unobserved in the corpus are skipped (left at their default IC).
-    """
-    from collections import Counter
-    import math
-
-    n = len(samples)
-    counts: Counter = Counter()
-
-    for sample in samples:
-        seen = set()
-        for term in sample.hpo_set:
-            for ancestor in term.all_parents:
-                seen.add(ancestor.id)
-            seen.add(term.id)
-        counts.update(seen)
-
-    for term_id, count in counts.items():
-        try:
-            term = Ontology.get_hpo_object(term_id)
-            ic = -math.log(count / n)
-            term.information_content.set_custom("corpus", ic)
-        except RuntimeError:
-            pass
-
-    print(f"  Corpus IC computed for {len(counts)} terms across {n} samples.")
-
-
-# Similarity matrix
-
-
-def compute_similarity_matrix(
-    samples: list[Sample],
-    ic_source: str,
-    sim_method: str,
-) -> np.ndarray:
-    """Compute the full pairwise BMA similarity matrix (N×N)."""
-    n = len(samples)
-    sim = np.zeros((n, n), dtype=np.float64)
-
-    total_pairs = n * (n - 1) // 2
-    with tqdm(total=total_pairs, desc=f"Computing pairwise BMA {sim_method} similarity") as bar:
-        for i, j in combinations(range(n), 2):
-            val = samples[i].hpo_set.similarity(
-                samples[j].hpo_set,
-                kind=ic_source,
-                method=sim_method,
-                combine="BMA",
-            )
-            sim[i, j] = val
-            sim[j, i] = val
-            bar.update(1)
-
-    np.fill_diagonal(sim, 1.0)
-
-    return sim
-
-
-# Distance conversion and clustering
-
-
-def sim_to_dist(sim_matrix: np.ndarray) -> np.ndarray:
-    """Convert Resnik similarity to distance: dist = 1 - sim_norm."""
-    max_val = sim_matrix.max()
-    if max_val == 0:
-        sys.exit(
-            "ERROR: all pairwise similarities are zero. "
-            "Check that your HPO terms are present in the ontology."
-        )
-    dist = 1.0 - (sim_matrix / max_val)
-    np.fill_diagonal(dist, 0.0)
-    return dist
-
-
-def cluster(dist_matrix: np.ndarray, n_clusters: int, linkage: str) -> np.ndarray:
-    """Agglomerative clustering on a precomputed distance matrix."""
-    model = AgglomerativeClustering(
-        n_clusters=n_clusters,
-        metric="precomputed",
-        linkage=linkage,
+    X_disease = csr_matrix(
+        (np.ones(len(rows), dtype=np.float32), (rows, cols)),
+        shape=(d_row, V),
     )
-    return model.fit_predict(dist_matrix)
+    print(f"  {d_row} OMIM diseases with ≥2 terms overlapping patient vocabulary")
+    return disease_ids, disease_names, X_disease
+
+
+def cluster_disease_distances(
+    X_bin: csr_matrix,
+    labels: np.ndarray,
+    X_disease: csr_matrix,
+) -> np.ndarray:
+    """Compute average Jaccard distance from each cluster to each OMIM disease.
+
+    Returns a K × D array (K clusters, D diseases), values in [0, 1].
+    Lower = more similar.
+    """
+    cluster_ids = sorted(set(labels))
+    D = X_disease.shape[0]
+    dist_matrix = np.zeros((len(cluster_ids), D), dtype=np.float64)
+    disease_sums = np.asarray(X_disease.sum(axis=1)).flatten()
+
+    for k in tqdm(cluster_ids, desc="Computing cluster–OMIM distances"):
+        X_k = X_bin[labels == k]
+        patient_sums = np.asarray(X_k.sum(axis=1)).flatten()
+        intersections = (X_k @ X_disease.T).toarray().astype(np.float64)
+        unions = patient_sums[:, None] + disease_sums[None, :] - intersections
+        jac_dist = np.where(unions > 0, 1.0 - intersections / unions, 1.0)
+        dist_matrix[k] = jac_dist.mean(axis=0)
+
+    return dist_matrix
+
+
+# UMAP projection
+
+
+def umap_fit(
+    X: csr_matrix,
+    n_components: int,
+    n_neighbors: int,
+    min_dist: float,
+    seed: int = 42,
+):
+    """Fit UMAP and return (embedding, fitted_reducer)."""
+    try:
+        import umap  # noqa: PLC0415
+    except ImportError:
+        sys.exit("ERROR: umap-learn is not installed.\n  pip install umap-learn")
+
+    n_components = min(n_components, X.shape[0] - 1)
+    reducer = umap.UMAP(
+        n_components=n_components,
+        metric="jaccard",
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        random_state=seed,
+        low_memory=True,
+    )
+    return reducer.fit_transform(X), reducer
+
+
+# Clustering
+
+
+def cluster_kmeans(X: np.ndarray, n_clusters: int, seed: int = 42) -> np.ndarray:
+    return KMeans(n_clusters=n_clusters, n_init=10, random_state=seed).fit_predict(X)
 
 
 def select_k_by_silhouette(
-    dist_matrix: np.ndarray,
-    linkage: str,
-    k_min: int,
-    k_max: int,
+    X: np.ndarray, k_min: int, k_max: int
 ) -> tuple[int, list[tuple[int, float]]]:
-    """Sweep K from k_min to k_max and return the K with the highest silhouette score."""
     scores: list[tuple[int, float]] = []
-
     for k in tqdm(range(k_min, k_max + 1), desc="Silhouette sweep"):
-        labels = cluster(dist_matrix, k, linkage)
-        score = silhouette_score(dist_matrix, labels, metric="precomputed")
+        labels = cluster_kmeans(X, k)
+        score = silhouette_score(X, labels, metric="euclidean")
         scores.append((k, score))
-
     best_k, best_score = max(scores, key=lambda x: x[1])
     print(f"  Best K={best_k} (silhouette={best_score:.4f})")
+    if best_k <= 5:
+        print(
+            "  [hint] Silhouette favours compact groups and may undercount subtypes.\n"
+            "         Use --n-clusters to set a domain-informed K, or lower --n-neighbors\n"
+            "         to expose finer local structure."
+        )
     return best_k, scores
 
 
@@ -253,163 +204,33 @@ def select_k_by_silhouette(
 def save_results(
     samples: list[Sample],
     labels: np.ndarray,
-    sim_matrix: np.ndarray,
+    X_bin: csr_matrix,
+    X_umap: np.ndarray,
     output_path: Path,
     save_matrix: bool,
-    n_input: int,
-    silhouette_scores: list[tuple[int, float]] | None = None,
+    save_embeddings: bool,
 ) -> None:
+    """Save cluster assignment CSV and optional Jaccard matrix / UMAP embeddings."""
     df = (
-        pd.DataFrame(
-            {
-                "phenopacket": [s.name for s in samples],
-                "cluster": labels + 1,  # 1-indexed for human readability
-            }
-        )
+        pd.DataFrame({"phenopacket": [s.name for s in samples], "cluster": labels + 1})
         .sort_values(["cluster", "phenopacket"])
         .reset_index(drop=True)
     )
-
     df.to_csv(output_path, index=False)
-
-    if save_matrix:
-        mat_path = output_path.with_name(output_path.stem + "_similarity_matrix.csv")
-        names = [s.name for s in samples]
-        sim_df = pd.DataFrame(sim_matrix, index=names, columns=names)
-        sim_df.to_csv(mat_path)
-
-    counts = df["cluster"].value_counts().sort_index()
-
-    log_path = output_path.with_name(output_path.stem + "_summary.log")
-    with open(log_path, "w") as log:
-        log.write(f"Input phenopackets:  {n_input}\n")
-        log.write(f"Used in clustering:  {len(df)}\n")
-        log.write(f"Clusters:            {counts.nunique()}\n")
-        log.write(
-            f"Min / max / mean:    {counts.min()} / {counts.max()} / {counts.mean():.1f}\n"
-        )
-        log.write("\n")
-        log.write(f"{'Cluster':>9}  {'Count':>6}\n")
-        log.write("-" * 20 + "\n")
-        for cid, cnt in counts.items():
-            log.write(f"  {cid:>7}   {cnt:>5}\n")
-
-        if silhouette_scores:
-            log.write("\n")
-            log.write("Silhouette sweep:\n")
-            log.write(f"{'K':>5}  {'Silhouette':>10}\n")
-            log.write("-" * 20 + "\n")
-            for k, score in silhouette_scores:
-                marker = " *" if k == counts.nunique() else ""
-                log.write(f"  {k:>3}   {score:>10.4f}{marker}\n")
-
     print(f"Cluster assignments saved to: {output_path}")
-    print(f"Summary log saved to:         {log_path}")
+
+    names = [s.name for s in samples]
+
     if save_matrix:
-        print(f"Similarity matrix saved to:   {mat_path}")
+        intersection = (X_bin @ X_bin.T).toarray().astype(np.float64)
+        row_sums = np.asarray(X_bin.sum(axis=1)).flatten()
+        union = row_sums[:, None] + row_sums[None, :] - intersection
+        jaccard_dist = np.where(union > 0, 1.0 - intersection / union, 0.0)
+        mat_path = output_path.with_name(output_path.stem + "_jaccard_dist.csv")
+        pd.DataFrame(jaccard_dist, index=names, columns=names).to_csv(mat_path)
+        print(f"Jaccard-distance matrix saved to: {mat_path}")
 
-
-# CLI
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Cluster phenopackets using BMA Resnik HPO similarity",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument(
-        "--input", "-i", required=True, type=Path, metavar="DIR",
-        help="Directory containing phenopacket JSON files (searched recursively)",
-    )
-    p.add_argument(
-        "--n-clusters", "-n", type=int, default=None, metavar="N",
-        help="Number of clusters (omit to auto-select via silhouette analysis)",
-    )
-    p.add_argument(
-        "--k-min", type=int, default=2, metavar="N",
-        help="Minimum K for silhouette sweep (ignored when --n-clusters is set)",
-    )
-    p.add_argument(
-        "--k-max", type=int, default=30, metavar="N",
-        help="Maximum K for silhouette sweep (ignored when --n-clusters is set)",
-    )
-    p.add_argument(
-        "--output", "-o", type=Path, default=Path("clusters.csv"), metavar="FILE",
-        help="Output CSV file",
-    )
-    p.add_argument(
-        "--ic-source", choices=["omim", "orpha", "decipher", "gene", "corpus"], default="omim",
-        help="Information content source for similarity; 'corpus' computes IC from your phenopackets",
-    )
-    p.add_argument(
-        "--sim-method", choices=["resnik", "lin", "jc", "graphic"], default="resnik",
-        help="Semantic similarity method",
-    )
-    p.add_argument(
-        "--save-matrix", action="store_true",
-        help="Also write the N×N similarity matrix to CSV",
-    )
-    p.add_argument(
-        "--linkage", choices=["complete", "average", "single"], default="complete",
-        help="Agglomerative linkage strategy",
-    )
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
-    # 1. Load HPO ontology (downloaded automatically on first run by pyhpo)
-    print("Loading HPO ontology...")
-    Ontology()
-    print("  Ontology ready.")
-
-    # 2. Parse phenopackets
-    print(f"\nScanning phenopackets in: {args.input}")
-    samples = load_all_phenopackets(args.input)
-    n_input = len(samples)
-
-    if args.n_clusters is not None and n_input < args.n_clusters:
-        sys.exit(
-            f"ERROR: only {n_input} usable phenopackets but "
-            f"{args.n_clusters} clusters were requested. "
-            f"Lower --n-clusters or add more phenopackets."
-        )
-
-    # 3. Build HPO sets (ontology-validated); may drop further phenopackets
-    print("\nBuilding HPO sets...")
-    samples = build_hpo_sets(samples)
-
-    # 4. Optionally compute corpus IC and inject into the ontology
-    if args.ic_source == "corpus":
-        print("\nComputing corpus-based IC from phenopackets...")
-        inject_corpus_ic(samples)
-
-    # 5. Compute similarity and distance matrices
-    print(f"\nComputing {len(samples)}×{len(samples)} pairwise BMA similarity matrix...")
-    print(f"  IC source:  {args.ic_source}")
-    print(f"  Method:     {args.sim_method}")
-    sim_matrix = compute_similarity_matrix(samples, args.ic_source, args.sim_method)
-    dist_matrix = sim_to_dist(sim_matrix)
-
-    # 6. Select K via silhouette sweep if not specified
-    silhouette_scores: list[tuple[int, float]] | None = None
-    if args.n_clusters is None:
-        k_max = min(args.k_max, len(samples) - 1)
-        print(f"\nNo --n-clusters given; running silhouette sweep (K={args.k_min}..{k_max})...")
-        n_clusters, silhouette_scores = select_k_by_silhouette(
-            dist_matrix, args.linkage, args.k_min, k_max
-        )
-    else:
-        n_clusters = args.n_clusters
-
-    # 7. Cluster with chosen K
-    print(f"\nClustering into {n_clusters} groups (linkage={args.linkage})...")
-    labels = cluster(dist_matrix, n_clusters, args.linkage)
-
-    # 8. Save
-    save_results(samples, labels, sim_matrix, args.output, args.save_matrix, n_input, silhouette_scores)
-
-
-if __name__ == "__main__":
-    main()
+    if save_embeddings:
+        emb_path = output_path.with_name(output_path.stem + "_umap_embedding.csv")
+        pd.DataFrame(X_umap, index=names).to_csv(emb_path)
+        print(f"UMAP cluster embedding saved to:  {emb_path}")
