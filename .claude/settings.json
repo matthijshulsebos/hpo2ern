@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(/Users/z375180/Documents/ERDERA/data/**)",
+      "Edit(/Users/z375180/Documents/ERDERA/data/**)",
+      "Glob(/Users/z375180/Documents/ERDERA/data/**)",
+      "Grep(/Users/z375180/Documents/ERDERA/data/**)"
+    ]
+  }
+}
