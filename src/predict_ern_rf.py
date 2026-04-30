@@ -1,41 +1,19 @@
 #!/usr/bin/env python3
 """
-Train a Random Forest classifier to predict ERN from HPO terms and submitter.
+Random Forest model for predicting ERN from HPO terms (and optionally submitter).
 
-Features:
-  - Ontology-propagated binary HPO term vectors (same representation as
-    cluster_phenopackets.py)
-  - One-hot encoded submitter label (omit with --no-submitter)
-
-Target:
-  - ERN (European Reference Network) from phenopacket metaData.externalReferences
-
-ERN classes with fewer than --min-class-size patients are excluded from training
-and evaluation.
-
-Evaluation:
-  - Stratified train/test split
-  - Stratified k-fold cross-validation (on training set)
-  - Per-class precision / recall / F1
-  - Confusion matrix (CSV + heatmap PNG)
-  - Top feature importances (HPO terms and submitter categories)
-
-Usage:
-    python predict_ern.py --input /path/to/phenopackets/ [options]
-
-Options:
-    --input,           -i  DIR   Directory with phenopacket JSON files (required)
-    --output,          -o  FILE  Output directory (default: output/<timestamp>/)
-    --n-estimators         INT   Number of trees (default: 300)
-    --test-size          FLOAT   Fraction held out for testing (default: 0.20)
-    --cv-folds             INT   Stratified CV folds on training set (default: 5)
-    --min-class-size       INT   Drop ERN classes smaller than this (default: 10)
-    --top-features         INT   Feature importances to report (default: 30)
-    --no-submitter               Exclude submitter from the feature set
-    --save-model                 Persist the fitted model with joblib
+This module is imported by main.py and is not intended to be run standalone.
+Entry points:
+  - filter_by_class_size   Drop under-represented ERN classes before training
+  - build_feature_matrix   HPO binary matrix + optional one-hot submitter (training)
+  - build_predict_feature_matrix  Aligned feature matrix for inference
+  - train_and_evaluate     Train RF with CV + held-out test evaluation
+  - save_results           Write classification report, confusion matrix, feature importances
+  - save_model_bundle      Persist model + encoders to DEFAULT_MODEL_PATH (or custom path)
+  - predict_and_save       Load a saved bundle and write ERN predictions to CSV
 
 Dependencies:
-    pyhpo scikit-learn scipy numpy pandas tqdm matplotlib
+    pyhpo scikit-learn scipy numpy pandas matplotlib joblib
 """
 
 import os
@@ -51,17 +29,12 @@ warnings.filterwarnings("ignore", category=UserWarning, module="umap")
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix, hstack as sp_hstack
-from tqdm import tqdm
 
 from pyhpo import Ontology
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold, train_test_split, cross_validate
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    ConfusionMatrixDisplay,
-)
+from sklearn.metrics import classification_report, confusion_matrix
 
 from phenopackets import Sample, build_ancestry_matrix
 
@@ -74,12 +47,17 @@ def build_feature_matrix(
     vocabulary: list[str],
     X_hpo: csr_matrix,
     include_submitter: bool,
-) -> tuple[csr_matrix, list[str]]:
-    """Stack HPO binary matrix with optional one-hot submitter. Returns (X, feature_names)."""
+) -> tuple[csr_matrix, list[str], "OneHotEncoder | None"]:
+    """Stack HPO binary matrix with optional one-hot submitter.
+
+    Returns (X, feature_names, ohe) where ohe is the fitted OneHotEncoder
+    (or None when include_submitter is False). Save ohe in the model bundle
+    so it can be reused during prediction.
+    """
     feature_names = [_term_label(t) for t in vocabulary]
 
     if not include_submitter:
-        return X_hpo, feature_names
+        return X_hpo, feature_names, None
 
     submitters = np.array([s.submitter for s in samples]).reshape(-1, 1)
     ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=True)
@@ -87,7 +65,54 @@ def build_feature_matrix(
     sub_names = [f"submitter={v}" for v in ohe.categories_[0]]
 
     print(f"  Submitter one-hot: {X_sub.shape[1]} categories")
-    return sp_hstack([X_hpo, X_sub], format="csr"), feature_names + sub_names
+    return sp_hstack([X_hpo, X_sub], format="csr"), feature_names + sub_names, ohe
+
+
+def build_predict_feature_matrix(
+    samples: list[Sample],
+    vocabulary: list[str],
+    ohe: "OneHotEncoder | None",
+    include_submitter: bool,
+) -> csr_matrix:
+    """Build a feature matrix for *prediction*, aligned to the training vocabulary.
+
+    HPO columns outside the training vocabulary are silently ignored (zero).
+    Unknown submitter categories are handled by the saved OHE (sparse zeros).
+    """
+    vocab_idx = {t: i for i, t in enumerate(vocabulary)}
+    rows: list[int] = []
+    cols: list[int] = []
+
+    for i, sample in enumerate(samples):
+        term_set: set[str] = set()
+        for tid in sample.terms:
+            try:
+                hpo_term = Ontology.get_hpo_object(tid)
+                term_set.add(hpo_term.id)
+                for ancestor in hpo_term.all_parents:
+                    term_set.add(ancestor.id)
+            except RuntimeError:
+                pass
+        for t in term_set:
+            if t in vocab_idx:
+                rows.append(i)
+                cols.append(vocab_idx[t])
+
+    n, v = len(samples), len(vocabulary)
+    if rows:
+        X_hpo = csr_matrix(
+            (np.ones(len(rows), dtype=np.float32), (rows, cols)),
+            shape=(n, v),
+        )
+    else:
+        X_hpo = csr_matrix((n, v), dtype=np.float32)
+
+    if not include_submitter or ohe is None:
+        return X_hpo
+
+    submitters = np.array([s.submitter for s in samples]).reshape(-1, 1)
+    X_sub = ohe.transform(submitters)
+    return sp_hstack([X_hpo, X_sub], format="csr")
 
 
 def _term_label(tid: str) -> str:
@@ -116,6 +141,98 @@ def filter_by_class_size(
     classes = sorted(kept)
     print(f"  Keeping {len(filtered)} patients across {len(classes)} ERN classes")
     return filtered, classes
+
+
+# Model bundle
+
+
+NOT_APPLICABLE = "Not applicable"
+DEFAULT_MODEL_PATH: Path = Path.home() / ".cache" / "find-ern" / "ern_rf_model.joblib"
+
+
+def save_model_bundle(
+    model: RandomForestClassifier,
+    vocabulary: list[str],
+    le: LabelEncoder,
+    ohe: "OneHotEncoder | None",
+    include_submitter: bool,
+    path: Path = DEFAULT_MODEL_PATH,
+) -> "Path | None":
+    """Persist a self-contained model bundle (model + vocabulary + encoders).
+
+    Saved to *path*, which defaults to DEFAULT_MODEL_PATH so that --predict
+    can find the model without needing --model to be specified.
+    """
+    try:
+        import joblib
+    except ImportError:
+        print("[warn] joblib not installed; model bundle not saved.", file=sys.stderr)
+        return None
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bundle = {
+        "model": model,
+        "vocabulary": vocabulary,
+        "label_encoder": le,
+        "ohe": ohe,
+        "include_submitter": include_submitter,
+    }
+    joblib.dump(bundle, path)
+    return path
+
+
+def predict_and_save(
+    bundle_path: Path,
+    samples: list[Sample],
+    missing_only: bool,
+    output_path: Path,
+) -> None:
+    """Load a saved model bundle and write ERN predictions to *output_path*.
+
+    If *missing_only* is True, only samples whose current ERN equals
+    'Not applicable' are predicted; otherwise all samples are predicted.
+    """
+    try:
+        import joblib
+    except ImportError:
+        print("[error] joblib is required for prediction; install it first.", file=sys.stderr)
+        return
+
+    bundle = joblib.load(bundle_path)
+    model: RandomForestClassifier = bundle["model"]
+    vocabulary: list[str] = bundle["vocabulary"]
+    le: LabelEncoder = bundle["label_encoder"]
+    ohe = bundle["ohe"]
+    include_submitter: bool = bundle["include_submitter"]
+
+    if missing_only:
+        predict_samples = [s for s in samples if s.ern == NOT_APPLICABLE]
+        print(f"  Found {len(predict_samples)} samples with ERN = '{NOT_APPLICABLE}'")
+    else:
+        predict_samples = list(samples)
+        print(f"  Predicting ERN for {len(predict_samples)} samples")
+
+    if not predict_samples:
+        print("[skip] No samples to predict.", file=sys.stderr)
+        return
+
+    print(f"  Building feature matrix aligned to training vocabulary ({len(vocabulary)} terms)...")
+    X = build_predict_feature_matrix(predict_samples, vocabulary, ohe, include_submitter)
+
+    y_pred = model.predict(X)
+    proba = model.predict_proba(X)
+    ern_pred = le.inverse_transform(y_pred)
+    confidence = proba.max(axis=1)
+
+    df = pd.DataFrame({
+        "sample": [s.name for s in predict_samples],
+        "current_ern": [s.ern for s in predict_samples],
+        "predicted_ern": ern_pred,
+        "confidence": confidence.round(4),
+    })
+    df.to_csv(output_path, index=False)
+    print(f"  Predictions saved:  {output_path}")
+    print(f"  {len(df)} samples predicted across {df['predicted_ern'].nunique()} ERN classes")
 
 
 # Training & evaluation
@@ -177,9 +294,6 @@ def train_and_evaluate(
         "cv": cv_results,
         "report": report,
         "confusion_matrix": cm,
-        "X_train": X_train, "X_test": X_test,
-        "y_train": y_train, "y_test": y_test,
-        "y_pred": y_pred,
     }
 
 
@@ -209,7 +323,6 @@ def save_results(
     data_dir: Path,
     plots_dir: Path,
     top_n: int,
-    save_model: bool,
 ) -> None:
     from plot_model_performance import (
         plot_confusion_matrix,
@@ -266,14 +379,6 @@ def save_results(
     # CV score plot
     plot_cv_scores(cv, plots_dir / "ern_cv_scores.png")
 
-    # Model
-    if save_model:
-        try:
-            import joblib
-            model_path = data_dir / "ern_rf_model.joblib"
-            joblib.dump(model, model_path)
-            print(f"Model saved:                  {model_path}")
-        except ImportError:
-            print("[warn] joblib not installed; model not saved.", file=sys.stderr)
+
 
 
