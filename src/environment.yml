@@ -9,6 +9,7 @@ dependencies:
   - pandas
   - scikit-learn
   - joblib
+  - lightgbm
   - tqdm
   - pip
   - pip:

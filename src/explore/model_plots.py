@@ -11,11 +11,8 @@ from sklearn.metrics import ConfusionMatrixDisplay
 
 
 def plot_confusion_matrix(
-    cm: np.ndarray,
-    class_names: list[str],
-    output_path: Path,
+    cm: np.ndarray, class_names: list[str], output_path: Path
 ) -> None:
-    """Save a heatmap of the confusion matrix to *output_path*."""
     fig_size = max(8, len(class_names) * 0.9)
     fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.85))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
@@ -28,14 +25,11 @@ def plot_confusion_matrix(
 
 
 def plot_feature_importances(
-    imp_df: pd.DataFrame,
-    top_n: int,
-    output_path: Path,
+    imp_df: pd.DataFrame, top_n: int, output_path: Path
 ) -> None:
-    """Save a horizontal bar chart of the top-N feature importances to *output_path*."""
     fig, ax = plt.subplots(figsize=(9, max(5, top_n * 0.28)))
     ax.barh(imp_df["feature"][::-1], imp_df["importance"][::-1], color="steelblue")
-    ax.set_xlabel("Mean decrease in impurity", fontsize=9)
+    ax.set_xlabel("Feature importance (gain)", fontsize=9)
     ax.set_title(f"Top {top_n} features for ERN prediction", fontsize=11)
     ax.tick_params(axis="y", labelsize=7)
     fig.tight_layout()
@@ -44,11 +38,7 @@ def plot_feature_importances(
     print(f"Feature importances plot:     {output_path}")
 
 
-def plot_cv_scores(
-    cv_results: dict,
-    output_path: Path,
-) -> None:
-    """Box plot of per-fold CV scores (accuracy, F1 macro, F1 weighted)."""
+def plot_cv_scores(cv_results: dict, output_path: Path) -> None:
     metrics = {
         "Accuracy": cv_results["test_accuracy"],
         "F1 macro": cv_results["test_f1_macro"],

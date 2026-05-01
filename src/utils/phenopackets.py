@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-"""
-Shared phenopacket data model, parsing, and HPO matrix construction.
-
-Imported by cluster_phenopackets, summarise_clusters, and predict_ern_rf
-so that loading and feature-engineering logic lives in exactly one place.
-"""
+"""Phenopacket data model, JSON parsing, and ontology-propagated HPO matrix."""
 
 import json
 import sys
@@ -18,18 +12,12 @@ from tqdm import tqdm
 from pyhpo import Ontology
 
 
-# Data model
-
-
 @dataclass
 class Sample:
     name: str
     terms: list[str]        # direct (non-excluded) HPO term IDs
     submitter: str = ""
     ern: str = ""
-
-
-# Phenopacket parsing
 
 
 def load_phenopacket(filepath: Path) -> tuple[list[str], str, str]:
@@ -85,30 +73,20 @@ def validate_terms(samples: list[Sample]) -> list[Sample]:
                 Ontology.get_hpo_object(t)
                 ok.append(t)
             except RuntimeError:
-                print(
-                    f"[warn] {sample.name}: unknown term {t!r} skipped",
-                    file=sys.stderr,
-                )
+                print(f"[warn] {sample.name}: unknown term {t!r} skipped", file=sys.stderr)
         if not ok:
-            print(
-                f"[skip] {sample.name}: no valid HPO terms after ontology check",
-                file=sys.stderr,
-            )
+            print(f"[skip] {sample.name}: no valid HPO terms after ontology check", file=sys.stderr)
             continue
         sample.terms = ok
         valid.append(sample)
     return valid
 
 
-# Ontology-propagated binary matrix
-
-
 def build_ancestry_matrix(samples: list[Sample]) -> tuple[csr_matrix, list[str]]:
     """Build a sparse N×V binary matrix of ontology-propagated HPO presence.
 
-    For each patient every directly annotated term AND all its ontology ancestors
-    are marked 1. V is the union of all such terms across the cohort.
-    Returns (sparse_matrix, sorted_vocabulary).
+    Every directly annotated term AND all its ontology ancestors are marked 1.
+    V is the union of all such terms across the cohort.
     """
     patient_sets: list[set[str]] = []
     vocab: set[str] = set()

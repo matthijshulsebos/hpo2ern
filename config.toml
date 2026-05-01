@@ -1,0 +1,31 @@
+# ERDERA ERN prediction — hyperparameter configuration
+# CLI flags always override these values when provided.
+
+[model]
+class_weight = "balanced"
+
+[tuning]
+n_iter   = 150   # number of random parameter combinations to try
+cv_folds = 5    # inner CV folds used during the search
+
+# Search space — each key is a LGBMClassifier parameter; values are sampled uniformly.
+[tuning.param_space]
+n_estimators      = [100, 200, 300, 500, 800]
+learning_rate     = [0.01, 0.05, 0.1, 0.2, 0.3]
+num_leaves        = [20, 31, 50, 80, 100]
+max_depth         = [-1, 5, 7, 10]
+min_child_samples = [5, 10, 20, 50]
+subsample         = [0.7, 0.8, 0.9, 1.0]
+colsample_bytree  = [0.7, 0.8, 0.9, 1.0]
+reg_alpha         = [0.0, 0.1, 0.5, 1.0]
+reg_lambda        = [0.0, 0.1, 0.5, 1.0]
+
+[training]
+test_size       = 0.20
+cv_folds        = 5
+min_class_size  = 10      # ERN classes with fewer patients are dropped
+top_features    = 30      # how many features to write to the importance report
+save_model      = true    # persist the model bundle to paths.model after training
+
+[paths]
+model = "~/.cache/find-ern/ern_rf_model.joblib"
