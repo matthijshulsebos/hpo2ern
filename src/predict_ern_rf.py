@@ -147,6 +147,13 @@ def filter_by_class_size(
 
 
 NOT_APPLICABLE = "Not applicable"
+_NOT_APPLICABLE_VALUES = {"not applicable", "not_applicable", ""}
+
+
+def is_unlabeled(ern: str) -> bool:
+    return ern.strip().lower() in _NOT_APPLICABLE_VALUES
+
+
 DEFAULT_MODEL_PATH: Path = Path.home() / ".cache" / "find-ern" / "ern_rf_model.joblib"
 
 
@@ -206,8 +213,8 @@ def predict_and_save(
     include_submitter: bool = bundle["include_submitter"]
 
     if missing_only:
-        predict_samples = [s for s in samples if s.ern == NOT_APPLICABLE]
-        print(f"  Found {len(predict_samples)} samples with ERN = '{NOT_APPLICABLE}'")
+        predict_samples = [s for s in samples if is_unlabeled(s.ern)]
+        print(f"  Found {len(predict_samples)} samples with unlabeled ERN")
     else:
         predict_samples = list(samples)
         print(f"  Predicting ERN for {len(predict_samples)} samples")

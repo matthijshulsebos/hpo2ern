@@ -218,7 +218,14 @@ def format_cohort_section(
         f"    Mean {np.mean(tc):.1f}  ·  Median {int(np.median(tc))}"
         f"  ·  Min {min(tc)}  ·  Max {max(tc)}",
         "",
-        *_fmt_top_terms(hpo_freq, n, n_total, top_n_terms, cohort_freq=hpo_freq),
+        *_fmt_top_terms(hpo_freq, n, n, top_n_terms, cohort_freq=hpo_freq),
+        "",
+        *_fmt_top_omim(top_omim),
+    ]
+    return "\n".join(lines)
+
+
+def format_cluster_section(
     samples: list[Sample],
     labels: np.ndarray,
     cluster_dist: np.ndarray,
@@ -258,7 +265,15 @@ def format_cohort_section(
             f"    Mean {np.mean(tc):.1f}  ·  Median {int(np.median(tc))}"
             f"  ·  Min {min(tc)}  ·  Max {max(tc)}",
             "",
-        *_fmt_top_terms(hpo_freq, n, n_total, top_n_terms, cohort_freq=global_freq),
+            *_fmt_top_terms(hpo_freq, n, n_total, top_n_terms, cohort_freq=global_freq),
+            "",
+            *_fmt_top_omim(top_omim),
+        ]
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def format_ern_section(
     samples: list[Sample],
     labels: np.ndarray,
     ern_ids: list[str],
@@ -304,7 +319,12 @@ def format_cohort_section(
             f"    Mean {np.mean(tc):.1f}  ·  Median {int(np.median(tc))}"
             f"  ·  Min {min(tc)}  ·  Max {max(tc)}",
             "",
-        *_fmt_top_terms(hpo_freq, n, n_total, top_n_terms, cohort_freq=global_freq),
+            *_fmt_top_terms(hpo_freq, n, n_total, top_n_terms, cohort_freq=global_freq),
+            "",
+            *_fmt_top_omim(top_omim),
+        ]
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
 
 
 def write_summary(

@@ -57,6 +57,7 @@ from plot_cohort_statistics import (
 )
 from predict_ern_rf import (
     NOT_APPLICABLE,
+    is_unlabeled,
     DEFAULT_MODEL_PATH,
     filter_by_class_size,
     build_feature_matrix,
@@ -237,10 +238,10 @@ def main() -> None:
     if run_train:
         _section("Training")
 
-        labeled = [s for s in samples if s.ern != NOT_APPLICABLE]
+        labeled = [s for s in samples if not is_unlabeled(s.ern)]
         n_unlabeled = len(samples) - len(labeled)
         if n_unlabeled:
-            print(f"  Excluded {n_unlabeled} samples with ERN='{NOT_APPLICABLE}' (no label)")
+            print(f"  Excluded {n_unlabeled} samples with unlabeled ERN (no label)")
 
         train_samples, class_names = filter_by_class_size(labeled, args.min_class_size)
         if len(class_names) < 2:

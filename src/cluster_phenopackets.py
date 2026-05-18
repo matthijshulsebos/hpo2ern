@@ -169,7 +169,12 @@ def umap_fit(
         random_state=seed,
         low_memory=True,
     )
-    return reducer.fit_transform(X), reducer
+    embedding = reducer.fit_transform(X)
+    nan_rows = np.isnan(embedding).any(axis=1).sum()
+    if nan_rows:
+        print(f"  [warn] UMAP produced NaN in {nan_rows} row(s); replacing with 0")
+        embedding = np.nan_to_num(embedding, nan=0.0)
+    return embedding, reducer
 
 
 # Clustering
