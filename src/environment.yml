@@ -5,12 +5,13 @@ channels:
 dependencies:
   - python=3.13
   - numpy
+  - scipy
   - pandas
   - scikit-learn
+  - joblib
+  - lightgbm
   - tqdm
   - pip
   - pip:
     - pyhpo
-    - sentence-transformers>=2.7.0
-    - umap-learn>=0.5.0
     - matplotlib>=3.7.0
