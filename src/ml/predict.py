@@ -22,6 +22,7 @@ def predict_and_save(
         print("[error] joblib is required for prediction; install it first.", file=sys.stderr)
         return
 
+    # load model, vocabulary and label encoder from bundle
     bundle = joblib.load(bundle_path)
     model = bundle["model"]
     vocabulary: list[str] = bundle["vocabulary"]
@@ -41,9 +42,11 @@ def predict_and_save(
     print(f"  Building feature matrix aligned to training vocabulary ({len(vocabulary)} terms)...")
     X = build_predict_feature_matrix(predict_samples, vocabulary)
 
+    # predict class and probability distribution
     y_pred = model.predict(X)
     proba = model.predict_proba(X)
     ern_pred = le.inverse_transform(y_pred)
+    # confidence = probability of the top predicted class
     confidence = proba.max(axis=1)
 
     df = pd.DataFrame({

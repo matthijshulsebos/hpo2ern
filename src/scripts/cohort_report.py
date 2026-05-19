@@ -30,7 +30,7 @@ from pyhpo import Ontology
 from utils.phenopackets import Sample, load_all_phenopackets, validate_terms
 
 
-# ── Plots ─────────────────────────────────────────────────────────────────────
+# plots
 
 def plot_ern_distribution(samples: list[Sample], output_path: Path) -> None:
     counts = Counter(s.ern for s in samples)
@@ -135,7 +135,7 @@ def plot_top_hpo_terms(
     print(f"Top HPO terms plot:           {output_path}")
 
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# summary
 
 def _term_name(tid: str) -> str:
     try:
@@ -244,7 +244,7 @@ def write_summary(samples: list[Sample], output_path: Path, top_terms: int = 15)
     print(f"Summary log saved to:         {log_path}")
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# cli
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
