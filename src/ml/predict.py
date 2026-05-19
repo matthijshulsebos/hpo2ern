@@ -7,7 +7,7 @@ import pandas as pd
 
 from utils.phenopackets import Sample
 from ml.features import build_predict_feature_matrix
-from ml.train import NOT_APPLICABLE
+from utils.phenopackets import is_unlabeled
 
 
 def predict_and_save(
@@ -28,8 +28,8 @@ def predict_and_save(
     le = bundle["label_encoder"]
 
     if missing_only:
-        predict_samples = [s for s in samples if s.ern == NOT_APPLICABLE]
-        print(f"  Found {len(predict_samples)} samples with ERN = '{NOT_APPLICABLE}'")
+        predict_samples = [s for s in samples if is_unlabeled(s.ern)]
+        print(f"  Found {len(predict_samples)} samples with unlabeled ERN")
     else:
         predict_samples = list(samples)
         print(f"  Predicting ERN for {len(predict_samples)} samples")
@@ -53,5 +53,5 @@ def predict_and_save(
         "confidence": confidence.round(4),
     })
     df.to_csv(output_path, index=False)
-    print(f"  Predictions saved:  {output_path}")
-    print(f"  {len(df)} samples predicted across {df['predicted_ern'].nunique()} ERN classes")
+    print(f"Predictions saved:  {output_path}")
+    print(f"{len(df)} samples predicted across {df['predicted_ern'].nunique()} ERN classes")

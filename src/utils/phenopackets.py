@@ -12,6 +12,13 @@ from tqdm import tqdm
 from pyhpo import Ontology
 
 
+_UNLABELED_VALUES = {"", "unknown", "not applicable", "not_applicable"}
+
+
+def is_unlabeled(ern: str) -> bool:
+    return ern.strip().lower() in _UNLABELED_VALUES
+
+
 @dataclass
 class Sample:
     name: str
@@ -20,10 +27,14 @@ class Sample:
     ern: str = ""
 
 
-def load_phenopacket(filepath: Path) -> tuple[list[str], str, str]:
-    """Return (hpo_terms, submitter, ern) from a phenopacket JSON file."""
+def load_phenopacket(filepath: Path) -> tuple[str, list[str], str, str]:
+    """Return (phenopacket_id, hpo_terms, submitter, ern) from a phenopacket JSON file."""
     with open(filepath) as fh:
         data = json.load(fh)
+
+    if "id" not in data:
+        raise ValueError(f"{filepath}: missing mandatory 'id' field")
+    phenopacket_id = data["id"]
 
     terms: list[str] = []
     for feature in data.get("phenotypicFeatures", []):
@@ -36,9 +47,9 @@ def load_phenopacket(filepath: Path) -> tuple[list[str], str, str]:
     meta = data.get("metaData", {})
     submitter = meta.get("submittedBy", "unknown")
     refs = meta.get("externalReferences", [])
-    ern = refs[0].get("id", "unknown") if refs else "unknown"
+    ern = refs[0].get("id", "") if refs else ""
 
-    return terms, submitter, ern
+    return phenopacket_id, terms, submitter, ern
 
 
 def load_all_phenopackets(phenopacket_dir: Path) -> list[Sample]:
@@ -47,19 +58,28 @@ def load_all_phenopackets(phenopacket_dir: Path) -> list[Sample]:
         sys.exit(f"ERROR: no .json files found under {phenopacket_dir}")
 
     samples: list[Sample] = []
+    seen_ids: set[str] = set()
     n_skipped = 0
+    n_dupes = 0
     for f in files:
-        terms, submitter, ern = load_phenopacket(f)
+        phenopacket_id, terms, submitter, ern = load_phenopacket(f)
+        if phenopacket_id in seen_ids:
+            print(f"[skip] {f.name}: duplicate ID '{phenopacket_id}'", file=sys.stderr)
+            n_dupes += 1
+            continue
+        seen_ids.add(phenopacket_id)
         if not terms:
             print(f"[skip] {f.name}: no observed HPO terms", file=sys.stderr)
             n_skipped += 1
             continue
-        samples.append(Sample(name=f.stem, terms=terms, submitter=submitter, ern=ern))
+        samples.append(Sample(name=phenopacket_id, terms=terms, submitter=submitter, ern=ern))
 
-    print(
-        f"Loaded {len(samples)} phenopackets"
-        + (f" ({n_skipped} skipped: no HPO terms)" if n_skipped else "")
-    )
+    suffix = ""
+    if n_dupes:
+        suffix += f", {n_dupes} duplicate IDs skipped"
+    if n_skipped:
+        suffix += f", {n_skipped} skipped (no HPO terms)"
+    print(f"Loaded {len(samples)} phenopackets{suffix}")
     return samples
 
 

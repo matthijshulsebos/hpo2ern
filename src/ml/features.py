@@ -6,10 +6,9 @@ training vocabulary.
 """
 
 import numpy as np
+
 from scipy.sparse import csr_matrix
-
 from pyhpo import Ontology
-
 from utils.phenopackets import Sample
 
 

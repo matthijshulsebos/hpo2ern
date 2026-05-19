@@ -12,22 +12,44 @@ from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder
 
-from utils.phenopackets import Sample
+from utils.phenopackets import Sample, is_unlabeled
 
 
 NOT_APPLICABLE = "Not_Applicable"
 DEFAULT_MODEL_PATH: Path = Path.home() / ".cache" / "find-ern" / "ern_lgbm_model.joblib"
 
 DEFAULT_PARAM_SPACE: dict = {
-    "n_estimators":      [100, 200, 300, 500, 800],
-    "learning_rate":     [0.01, 0.05, 0.1, 0.2, 0.3],
-    "num_leaves":        [20, 31, 50, 80, 100],
-    "max_depth":         [-1, 5, 7, 10],
-    "min_child_samples": [5, 10, 20, 50],
-    "subsample":         [0.7, 0.8, 0.9, 1.0],
-    "colsample_bytree":  [0.7, 0.8, 0.9, 1.0],
-    "reg_alpha":         [0.0, 0.1, 0.5, 1.0],
-    "reg_lambda":        [0.0, 0.1, 0.5, 1.0],
+    # boosting rounds
+    "n_estimators": [200, 500, 1000, 2000],
+
+    # shrinkage
+    "learning_rate": [0.01, 0.03, 0.05, 0.1],
+
+    # tree structure
+    "num_leaves": [7, 15, 31, 63],
+    "max_depth": [3, 4, 5, 6, -1],
+
+    # minimum samples in leaf
+    "min_child_samples": [20, 50, 100, 200],
+
+    # minimum hessian in leaf
+    "min_child_weight": [1e-3, 1e-2, 1e-1, 1],
+
+    # split gain regularization
+    "min_split_gain": [0.0, 0.1, 0.3, 1.0],
+
+    # row subsampling
+    "subsample": [0.6, 0.8, 1.0],
+
+    # feature subsampling
+    "colsample_bytree": [0.3, 0.5, 0.7, 1.0],
+
+    # regularization
+    "reg_alpha": [0.0, 0.01, 0.1, 1.0, 5.0],
+    "reg_lambda": [0.0, 0.1, 1.0, 5.0, 10.0],
+
+    # imbalance handling
+    "scale_pos_weight": [1, 2, 5, 10, 20, 50],
 }
 
 
@@ -79,7 +101,7 @@ def train_and_evaluate(
     }
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
 
-    print(f"  Randomised search: {n_iter} iterations × {cv_folds}-fold CV...")
+    print(f"Randomised search: {n_iter} iterations x {cv_folds}-fold CV...")
     search = RandomizedSearchCV(
         estimator=base_model,
         param_distributions=param_space,
@@ -102,13 +124,13 @@ def train_and_evaluate(
         for m in ["accuracy", "f1_macro", "f1_weighted"]
     }
 
-    print(f"  Best params : {search.best_params_}")
+    print(f"Best params : {search.best_params_}")
     print(
-        f"  Best CV F1 macro  : {cv_fold_scores['test_f1_macro'].mean():.3f}"
+        f"Best CV F1 macro  : {cv_fold_scores['test_f1_macro'].mean():.3f}"
         f" ± {cv_fold_scores['test_f1_macro'].std():.3f}"
     )
     print(
-        f"  Best CV accuracy  : {cv_fold_scores['test_accuracy'].mean():.3f}"
+        f"Best CV accuracy  : {cv_fold_scores['test_accuracy'].mean():.3f}"
         f" ± {cv_fold_scores['test_accuracy'].std():.3f}"
     )
 
@@ -172,7 +194,7 @@ def save_results(
 
     report_path = data_dir / "ern_prediction_report.txt"
     with open(report_path, "w") as fh:
-        fh.write("ERN PREDICTION — LIGHTGBM\n")
+        fh.write("ERN PREDICTION: LIGHTGBM\n")
         fh.write("=" * 50 + "\n\n")
         fh.write("Best hyperparameters:\n")
         for k, v in sorted(best_params.items()):
@@ -198,15 +220,16 @@ def save_results(
             )
     print(f"Classification report:        {report_path}")
 
+    # Confusion matrix plot generation
     cm = results["confusion_matrix"]
     cm_path = data_dir / "ern_confusion_matrix.csv"
     pd.DataFrame(cm, index=class_names, columns=class_names).to_csv(cm_path)
-    print(f"Confusion matrix CSV:         {cm_path}")
     plot_confusion_matrix(cm, class_names, plots_dir / "ern_confusion_matrix.png")
 
+    # Feature importance plot generation
     imp_df = top_feature_importances(model, feature_names, top_n)
     imp_df.to_csv(data_dir / "ern_feature_importances.csv", index=False)
-    print(f"Feature importances CSV:      {data_dir / 'ern_feature_importances.csv'}")
     plot_feature_importances(imp_df, top_n, plots_dir / "ern_feature_importances.png")
 
+    # Cross-validation scores plot generation
     plot_cv_scores(cv, plots_dir / "ern_cv_scores.png")
