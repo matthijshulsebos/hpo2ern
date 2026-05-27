@@ -3,11 +3,44 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from scipy.sparse import csr_matrix
+from pyhpo import Ontology
 
-from utils.phenopackets import Sample
-from ml.features import build_predict_feature_matrix
-from utils.phenopackets import is_unlabeled
+from utils.phenopackets import Sample, is_unlabeled
+
+
+def build_predict_feature_matrix(
+    samples: list[Sample],
+    vocabulary: list[str],
+) -> csr_matrix:
+    """Build a feature matrix for prediction, aligned to the training vocabulary."""
+    vocab_idx = {t: i for i, t in enumerate(vocabulary)}
+    rows: list[int] = []
+    cols: list[int] = []
+
+    for i, sample in enumerate(samples):
+        term_set: set[str] = set()
+        for tid in sample.terms:
+            try:
+                hpo_term = Ontology.get_hpo_object(tid)
+                term_set.add(hpo_term.id)
+                for ancestor in hpo_term.all_parents:
+                    term_set.add(ancestor.id)
+            except RuntimeError:
+                pass
+        for t in term_set:
+            if t in vocab_idx:
+                rows.append(i)
+                cols.append(vocab_idx[t])
+
+    n, v = len(samples), len(vocabulary)
+    return (
+        csr_matrix((np.ones(len(rows), dtype=np.float32), (rows, cols)), shape=(n, v))
+        if rows
+        else csr_matrix((n, v), dtype=np.float32)
+    )
 
 
 def predict_and_save(
@@ -19,7 +52,7 @@ def predict_and_save(
     try:
         import joblib
     except ImportError:
-        print("[error] joblib is required for prediction; install it first.", file=sys.stderr)
+        print("[error] joblib is required for prediction: install it first.", file=sys.stderr)
         return
 
     # load model, vocabulary and label encoder from bundle
@@ -30,16 +63,16 @@ def predict_and_save(
 
     if missing_only:
         predict_samples = [s for s in samples if is_unlabeled(s.ern)]
-        print(f"  Found {len(predict_samples)} samples with unlabeled ERN")
+        print(f"Found {len(predict_samples)} samples with unlabeled ERN")
     else:
         predict_samples = list(samples)
-        print(f"  Predicting ERN for {len(predict_samples)} samples")
+        print(f"Predicting ERN for {len(predict_samples)} samples")
 
     if not predict_samples:
         print("[skip] No samples to predict.", file=sys.stderr)
         return
 
-    print(f"  Building feature matrix aligned to training vocabulary ({len(vocabulary)} terms)...")
+    print(f"Building feature matrix aligned to training vocabulary ({len(vocabulary)} terms).")
     X = build_predict_feature_matrix(predict_samples, vocabulary)
 
     # predict class and probability distribution
@@ -51,6 +84,7 @@ def predict_and_save(
 
     df = pd.DataFrame({
         "sample": [s.name for s in predict_samples],
+        "submitter": [s.submitter for s in predict_samples],
         "current_ern": [s.ern for s in predict_samples],
         "predicted_ern": ern_pred,
         "confidence": confidence.round(4),

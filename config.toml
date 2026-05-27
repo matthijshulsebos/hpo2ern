@@ -1,31 +1,30 @@
-# ERDERA ERN prediction — hyperparameter configuration
-# CLI flags always override these values when provided.
+# ERDERA ERN prediction hyperparameter configuration
 
 [model]
 class_weight = "balanced"
 
 [tuning]
-n_iter   = 150   # number of random parameter combinations to try
+n_iter   = 75   # number of random parameter combinations to try
 cv_folds = 5    # inner CV folds used during the search
 
 # Search space — each key is a LGBMClassifier parameter; values are sampled uniformly.
+# n_estimators is NOT listed here: early stopping determines the optimal tree count.
 [tuning.param_space]
-n_estimators      = [100, 200, 300, 500, 800]
-learning_rate     = [0.01, 0.05, 0.1, 0.2, 0.3]
-num_leaves        = [20, 31, 50, 80, 100]
-max_depth         = [-1, 5, 7, 10]
-min_child_samples = [5, 10, 20, 50]
+learning_rate     = [0.03, 0.05, 0.1, 0.15]
+num_leaves        = [31, 63, 127, 255]
+max_depth         = [-1, 7, 10, 15]
+min_child_samples = [5, 10, 20, 50]   # lower floor for tail ERN classes (~10-30 samples)
+min_child_weight  = [0.001, 0.01, 0.1, 1.0]
+min_split_gain    = [0.0, 0.01, 0.05, 0.1]  # 1.0 blocks splits on rare classes
 subsample         = [0.7, 0.8, 0.9, 1.0]
-colsample_bytree  = [0.7, 0.8, 0.9, 1.0]
+subsample_freq    = [1]                # required to activate row subsampling
+colsample_bytree  = [0.5, 0.7, 0.9, 1.0]   # 0.3 too sparse at ~1% feature density
 reg_alpha         = [0.0, 0.1, 0.5, 1.0]
-reg_lambda        = [0.0, 0.1, 0.5, 1.0]
+reg_lambda        = [0.0, 0.1, 1.0, 5.0]
 
 [training]
 test_size       = 0.20
-cv_folds        = 5
-min_class_size  = 10      # ERN classes with fewer patients are dropped
-top_features    = 30      # how many features to write to the importance report
-save_model      = true    # persist the model bundle to paths.model after training
+top_features    = 30      # top-N features written to the importance plot/CSV
 
 [paths]
-model = "~/.cache/find-ern/ern_rf_model.joblib"
+model = "~/.cache/find-ern/ern_lgbm_model.joblib"

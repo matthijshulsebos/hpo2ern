@@ -1,4 +1,4 @@
-"""Visualisation utilities for ERN Random Forest model performance."""
+"""Visualisation utilities for ERN LightGBM model performance."""
 
 from pathlib import Path
 
@@ -17,7 +17,7 @@ def plot_confusion_matrix(
     fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.85))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
     disp.plot(ax=ax, colorbar=True, cmap="YlOrRd", xticks_rotation=45)
-    ax.set_title("ERN RF: confusion matrix (test set)", fontsize=11, pad=12)
+    ax.set_title("ERN prediction: confusion matrix (test set)", fontsize=11, pad=12)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
