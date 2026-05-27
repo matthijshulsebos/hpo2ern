@@ -1,0 +1,3 @@
+# ERDERA ERN Predictor
+
+Predicts which [European Reference Network (ERN)](https://health.ec.europa.eu/european-reference-networks_en) a patient most likely belongs to, given their HPO-annotated phenopacket. Features are built by propagating each patient's observed HPO terms through the ontology hierarchy to produce a binary presence matrix, which is fed to a LightGBM multiclass classifier tuned with Optuna's TPE sampler. ERN classes with too few samples for cross-validation are included in training but excluded from evaluation. Run `python src/main.py --input <phenopackets_dir> --output <results_dir> --train` to train a model, and `--predict` (optionally with `--model`) to generate predictions; all hyperparameters are controlled via `config.toml`.
