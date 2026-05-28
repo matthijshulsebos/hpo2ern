@@ -49,7 +49,7 @@ def train_and_evaluate(
     n_iter: int,
     param_space: dict,
     min_samples: int = 10,
-    weight_cap_factor: float = 5.0,
+    weight_cap_factors: list[float] | None = None,
     seed: int = 42,
 ) -> tuple[LGBMClassifier, dict]:
     # drop classes with fewer than min_samples; they can't support stratified CV
@@ -72,20 +72,21 @@ def train_and_evaluate(
     )
     X_cv, y_cv = X_train, y_train
 
-    # capped balanced sample weights — prevents tiny classes from dominating gradients
+    # balanced base weights; cap factor is tuned by Optuna
     large_counts = np.bincount(y_large, minlength=len(class_names))
     raw_w = np.where(
         large_counts > 0,
         len(y_large) / (len(class_names) * large_counts.astype(float)),
         0.0,
     )
-    cap = np.median(raw_w[raw_w > 0]) * weight_cap_factor
-    capped = np.minimum(raw_w, cap)
-    sw_train = capped[y_train]
+    median_raw_w = float(np.median(raw_w[raw_w > 0]))
+    _wcf_choices = weight_cap_factors if weight_cap_factors is not None else [2.0, 3.0, 5.0, 7.0, 10.0]
 
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
 
     def objective(trial: optuna.Trial) -> float:
+        wcf = trial.suggest_categorical("weight_cap_factor", _wcf_choices)
+        sw_trial = np.minimum(raw_w, median_raw_w * wcf)[y_train]
         params = {k: trial.suggest_categorical(k, v) for k, v in param_space.items()}
         fold_acc, fold_f1m, fold_f1w, best_iters = [], [], [], []
         for train_idx, val_idx in cv.split(X_cv, y_cv):
@@ -102,7 +103,7 @@ def train_and_evaluate(
             )
             m.fit(
                 X_tr, y_tr,
-                sample_weight=sw_train[train_idx],
+                sample_weight=sw_trial[train_idx],
                 eval_set=[(X_val, y_val)],
                 callbacks=[
                     lgb.early_stopping(stopping_rounds=50, verbose=False),
@@ -143,7 +144,9 @@ def train_and_evaluate(
     study.optimize(objective, n_trials=n_iter, n_jobs=1, show_progress_bar=False, callbacks=[_log_trial])
 
     best_trial = study.best_trial
-    best_params = best_trial.params
+    best_params = dict(best_trial.params)
+    best_wcf = best_params.pop("weight_cap_factor")
+    sw_train = np.minimum(raw_w, median_raw_w * best_wcf)[y_train]
     cv_fold_scores = {
         "test_accuracy": np.array(best_trial.user_attrs["fold_accuracy"]),
         "test_f1_macro": np.array(best_trial.user_attrs["fold_f1_macro"]),
