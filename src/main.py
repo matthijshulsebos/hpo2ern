@@ -75,28 +75,24 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _section(title: str) -> None:
-    print(f"\n {title}")
-
-
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
 
     tr = cfg.get("training", {})
-    n_iter         = cfg.get("tuning",   {}).get("n_iter",        50)
-    cv_folds       = cfg.get("tuning",   {}).get("cv_folds",       5)
-    param_space    = cfg.get("tuning",   {}).get("param_space",    DEFAULT_PARAM_SPACE)
-    optuna_jobs    = cfg.get("tuning",   {}).get("optuna_jobs",     4)
-    lgbm_threads   = cfg.get("tuning",   {}).get("lgbm_threads",   4)
-    test_size      = tr.get("test_size",      0.20)
-    top_features   = tr.get("top_features",   30)
-    model_path     = args.model or Path(
+    n_iter = cfg.get("tuning", {}).get("n_iter", 50)
+    cv_folds = cfg.get("tuning", {}).get("cv_folds", 5)
+    param_space = cfg.get("tuning", {}).get("param_space", DEFAULT_PARAM_SPACE)
+    optuna_jobs = cfg.get("tuning", {}).get("optuna_jobs", 4)
+    lgbm_threads = cfg.get("tuning", {}).get("lgbm_threads", 4)
+    test_size = tr.get("test_size", 0.20)
+    top_features = tr.get("top_features", 30)
+    model_path = args.model or Path(
         cfg.get("paths", {}).get("model", str(DEFAULT_MODEL_PATH))
     ).expanduser()
 
     if not args.train and not args.predict:
-        sys.exit("ERROR: specify at least one of --train or --predict.")
+        sys.exit("Specify at least --train or --predict.")
 
     if args.output is None:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -113,14 +109,14 @@ def main() -> None:
     print(f"Output : {run_dir}/")
     print(f"Steps  : {' · '.join(active)}")
 
-    _section("Loading")
-    # Loads the HPO ontology into memory (initialisation)
+    print("\n Loading")
+    # loads the HPO ontology into memory (initialisation)
     Ontology()
     samples = load_all_phenopackets(args.input)
     samples = validate_terms(samples)
 
     if args.train:
-        _section("Training")
+        print("\n Training")
 
         labeled = [s for s in samples if not is_unlabeled(s.ern)]
         n_unlabeled = len(samples) - len(labeled)
@@ -128,9 +124,8 @@ def main() -> None:
             print(f"Excluded {n_unlabeled} samples with unlabeled ERN (no label)")
 
         class_names = sorted(set(s.ern for s in labeled))
-        print(f"Training on {len(labeled)} patients across {len(class_names)} ERN classes")
         if len(class_names) < 2:
-            sys.exit("[error] Fewer than 2 ERN classes, cannot train.")
+            sys.exit("Fewer than 2 ERN classes, cannot train.")
 
         X_hpo, vocabulary = build_ancestry_matrix(labeled)
         feature_names = []
@@ -170,7 +165,7 @@ def main() -> None:
             print(f"  Model bundle  : {bundle_path}")
 
     if args.predict:
-        _section("Predicting")
+        print("\n Predicting")
         print(f"  Model bundle  : {model_path}")
         if not model_path.exists():
             sys.exit(
