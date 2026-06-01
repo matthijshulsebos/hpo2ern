@@ -139,6 +139,6 @@ def build_ancestry_matrix(samples: list[Sample]) -> tuple[csr_matrix, list[str]]
     )
     print(
         f"  Binary matrix: {n} patients × {v} HPO terms (incl. ancestors)"
-        f"  ·  density {X.nnz / (n * v):.1%}"
+        f"  , density {X.nnz / (n * v):.1%}"
     )
     return X, vocabulary

@@ -107,7 +107,7 @@ def main() -> None:
 
     active = [s for s, on in [("train", args.train), ("predict", args.predict)] if on]
     print(f"Output : {run_dir}/")
-    print(f"Steps  : {' · '.join(active)}")
+    print(f"Steps  : {', '.join(active)}")
 
     print("\n Loading")
     # loads the HPO ontology into memory (initialisation)
