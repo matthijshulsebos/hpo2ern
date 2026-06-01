@@ -1,30 +1,28 @@
-# ERDERA ERN prediction hyperparameter configuration
-
 [model]
 class_weight = "balanced"
 
 [tuning]
-n_iter   = 75   # number of random parameter combinations to try
-cv_folds = 5    # inner CV folds used during the search
+n_iter        = 75 
+cv_folds      = 5 
+optuna_jobs   = 4 
+lgbm_threads  = 4 
 
-# Search space — each key is a LGBMClassifier parameter; values are sampled uniformly.
-# n_estimators is NOT listed here: early stopping determines the optimal tree count.
 [tuning.param_space]
 learning_rate     = [0.03, 0.05, 0.1, 0.15]
 num_leaves        = [31, 63, 127, 255]
 max_depth         = [-1, 7, 10, 15]
-min_child_samples = [5, 10, 20, 50]   # lower floor for tail ERN classes (~10-30 samples)
+min_child_samples = [5, 10, 20, 50] 
 min_child_weight  = [0.001, 0.01, 0.1, 1.0]
-min_split_gain    = [0.0, 0.01, 0.05, 0.1]  # 1.0 blocks splits on rare classes
+min_split_gain    = [0.0, 0.01, 0.05, 0.1] 
 subsample         = [0.7, 0.8, 0.9, 1.0]
-subsample_freq    = [1]                # required to activate row subsampling
-colsample_bytree  = [0.5, 0.7, 0.9, 1.0]   # 0.3 too sparse at ~1% feature density
+subsample_freq    = [1]  
+colsample_bytree  = [0.5, 0.7, 0.9, 1.0] 
 reg_alpha         = [0.0, 0.1, 0.5, 1.0]
 reg_lambda        = [0.0, 0.1, 1.0, 5.0]
 
 [training]
 test_size       = 0.20
-top_features    = 30      # top-N features written to the importance plot/CSV
+top_features    = 30      # top n features written to the importance plot
 
 [paths]
 model = "~/.cache/find-ern/ern_lgbm_model.joblib"
