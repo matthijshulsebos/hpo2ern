@@ -1,13 +1,13 @@
-"""Visualisation utilities for ERN LightGBM model performance."""
-
-from pathlib import Path
+"""Plotting functions for model performance."""
 
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from sklearn.metrics import ConfusionMatrixDisplay
+
+from pathlib import Path
+from sklearn.metrics import ConfusionMatrixDisplay, roc_curve, auc
 
 
 def plot_confusion_matrix(
@@ -60,3 +60,83 @@ def plot_cv_scores(cv_results: dict, output_path: Path) -> None:
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"CV score plot:                {output_path}")
+
+
+def plot_roc_curves(
+    y_test: np.ndarray,
+    y_proba: np.ndarray,
+    class_indices: list[int],
+    class_names: list[str],
+    output_path: Path,
+) -> None:
+    # OVR ROC curves
+    fpr: dict[int, np.ndarray] = {}
+    tpr: dict[int, np.ndarray] = {}
+    thresholds: dict[int, np.ndarray] = {}
+    roc_auc: dict[int, float] = {}
+    for col, (ci, cn) in enumerate(zip(class_indices, class_names)):
+        y_bin = (y_test == ci).astype(int)
+        if y_bin.sum() == 0:
+            continue
+        fpr[col], tpr[col], thresholds[col] = roc_curve(y_bin, y_proba[:, col])
+        roc_auc[col] = auc(fpr[col], tpr[col])
+
+    ithaca_col = next(
+        (col for col, cn in enumerate(class_names) if "ITHACA" in cn.upper()),
+        None,
+    )
+    other_col = next(
+        (col for col, cn in enumerate(class_names) if cn == "Other"),
+        None,
+    )
+    named_cols = [col for col in roc_auc if col != other_col and col != ithaca_col]
+
+    base_fpr = np.linspace(0, 1, 300)
+
+    def _youden_point(col: int) -> tuple[float, float, float]:
+        j = tpr[col] - fpr[col]
+        idx = int(np.argmax(j))
+        return float(fpr[col][idx]), float(tpr[col][idx]), float(thresholds[col][idx])
+
+    def _mark_youden(col: int, color: str) -> None:
+        fx, ty, thr = _youden_point(col)
+        ax.plot(fx, ty, "o", color=color, ms=7, zorder=5)
+        ax.annotate(f"  p={thr:.2f}", (fx, ty), fontsize=7.5, color=color, va="center")
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # faint line per named ERN
+    for col in named_cols:
+        if col == ithaca_col:
+            continue
+        ax.plot(fpr[col], tpr[col], lw=1, alpha=0.35, color="steelblue")
+
+    # macro avg of named ERNs
+    if named_cols:
+        mean_tpr = np.mean([np.interp(base_fpr, fpr[c], tpr[c]) for c in named_cols], axis=0)
+        macro_auc = auc(base_fpr, mean_tpr)
+        ax.plot(base_fpr, mean_tpr, lw=2, color="steelblue", linestyle="--",
+                label=f"Named ERNs macro avg (AUC={macro_auc:.3f})")
+
+    # ITHACA highlighted with Youdens J marker
+    if ithaca_col is not None and ithaca_col in roc_auc:
+        ax.plot(fpr[ithaca_col], tpr[ithaca_col], lw=2.5, color="tomato",
+                label=f"{class_names[ithaca_col]} (AUC={roc_auc[ithaca_col]:.3f})")
+        _mark_youden(ithaca_col, "tomato")
+
+    # other with optimal threshold marker
+    if other_col is not None and other_col in roc_auc:
+        ax.plot(fpr[other_col], tpr[other_col], lw=2.5, color="goldenrod",
+                label=f"Other / rare ERNs (AUC={roc_auc[other_col]:.3f})")
+        _mark_youden(other_col, "goldenrod")
+
+    ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.4)
+    ax.set_xlabel("False Positive Rate", fontsize=9)
+    ax.set_ylabel("True Positive Rate", fontsize=9)
+    ax.set_title("ROC curves (test set)", fontsize=11)
+    ax.legend(fontsize=9)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"ROC curve plot:               {output_path}")
