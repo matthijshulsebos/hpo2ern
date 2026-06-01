@@ -1,12 +1,12 @@
 """Load a saved model bundle and write ERN predictions to CSV."""
 
 import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-
-from pathlib import Path
-from scipy.sparse import csr_matrix
 from pyhpo import Ontology
+from scipy.sparse import csr_matrix
 
 from utils.phenopackets import Sample, is_unlabeled
 

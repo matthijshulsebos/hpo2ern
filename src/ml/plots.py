@@ -1,12 +1,12 @@
 """Plotting functions for model performance."""
 
-import numpy as np
-import pandas as pd
+from pathlib import Path
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
-from pathlib import Path
+import numpy as np
+import pandas as pd
 from sklearn.metrics import ConfusionMatrixDisplay, roc_curve, auc
 
 

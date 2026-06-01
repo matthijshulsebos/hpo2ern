@@ -18,15 +18,9 @@ import os
 import sys
 import tomllib
 import warnings
-import numpy as np
-
 from pathlib import Path
 
-
-os.environ.setdefault("OMP_DISPLAY_ENV", "FALSE")
-os.environ.setdefault("KMP_WARNINGS", "FALSE")
-warnings.filterwarnings("ignore", category=UserWarning)
-
+import numpy as np
 from pyhpo import Ontology
 from sklearn.preprocessing import LabelEncoder
 
@@ -40,6 +34,11 @@ from ml.train import (
 )
 from ml.predict import predict_and_save
 
+
+# Suppress LightGBM warnings
+os.environ.setdefault("OMP_DISPLAY_ENV", "FALSE")
+os.environ.setdefault("KMP_WARNINGS", "FALSE")
+warnings.filterwarnings("ignore", category=UserWarning)
 
 CONFIG_PATH = Path("config.toml")
 

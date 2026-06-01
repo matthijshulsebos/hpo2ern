@@ -6,10 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from pyhpo import Ontology
 from scipy.sparse import csr_matrix
 from tqdm import tqdm
-
-from pyhpo import Ontology
 
 
 _UNLABELED_VALUES = {"", "unknown", "not applicable", "not_applicable"}

@@ -1,17 +1,17 @@
 """LightGBM training with Optuna TPE hyperparameter search for ERN prediction."""
 
 import sys
+from pathlib import Path
+
 import lightgbm as lgb
 import numpy as np
 import optuna
 import pandas as pd
-
-from scipy.sparse import csr_matrix
 from lightgbm import LGBMClassifier
+from scipy.sparse import csr_matrix
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder
-from pathlib import Path
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
