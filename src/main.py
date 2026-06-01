@@ -18,7 +18,10 @@ import os
 import sys
 import tomllib
 import warnings
+import numpy as np
+
 from pathlib import Path
+
 
 os.environ.setdefault("OMP_DISPLAY_ENV", "FALSE")
 os.environ.setdefault("KMP_WARNINGS", "FALSE")
@@ -85,6 +88,8 @@ def main() -> None:
     n_iter         = cfg.get("tuning",   {}).get("n_iter",        50)
     cv_folds       = cfg.get("tuning",   {}).get("cv_folds",       5)
     param_space    = cfg.get("tuning",   {}).get("param_space",    DEFAULT_PARAM_SPACE)
+    optuna_jobs    = cfg.get("tuning",   {}).get("optuna_jobs",     4)
+    lgbm_threads   = cfg.get("tuning",   {}).get("lgbm_threads",   4)
     test_size      = tr.get("test_size",      0.20)
     top_features   = tr.get("top_features",   30)
     model_path     = args.model or Path(
@@ -148,10 +153,16 @@ def main() -> None:
             cv_folds=cv_folds,
             n_iter=n_iter,
             param_space=param_space,
+            optuna_jobs=optuna_jobs,
+            lgbm_threads=lgbm_threads,
         )
 
         print(f"  Test accuracy : {results['accuracy']:.4f}")
         print(f"  Test F1 macro : {results['report']['macro avg']['f1-score']:.4f}")
+
+        # patch le to include "Other" if small classes were relabeled during training
+        if "Other" in results["class_names_remapped"]:
+            le.classes_ = np.append(le.classes_, "Other")
 
         save_train_results(results, model, feature_names, data_dir, plots_dir, top_features)
 

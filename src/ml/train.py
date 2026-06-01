@@ -200,7 +200,7 @@ def train_and_evaluate(
         "report": report,
         "confusion_matrix": cm,
         "eval_class_names": eval_class_names,
-        "class_names_work": class_names_remapped,
+        "class_names_remapped": class_names_remapped,
         "large_class_indices": large_class_indices,
         "y_test": y_test,
         "y_proba": y_proba,
