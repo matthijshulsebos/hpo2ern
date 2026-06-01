@@ -1,39 +1,33 @@
-"""LightGBM training with randomised hyperparameter search for ERN prediction."""
+"""LightGBM training with Optuna TPE hyperparameter search for ERN prediction."""
 
 import sys
-from pathlib import Path
-
 import lightgbm as lgb
 import numpy as np
 import optuna
 import pandas as pd
+
 from scipy.sparse import csr_matrix
 from lightgbm import LGBMClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder
+from pathlib import Path
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
+# I prefer .cache but you can store it elsewhere
 DEFAULT_MODEL_PATH: Path = Path.home() / ".cache" / "find-ern" / "ern_lgbm_model.joblib"
 
 DEFAULT_PARAM_SPACE: dict = {
-    # n_estimators is no longer a search parameter: early stopping determines
-    # the optimal tree count automatically during each CV fold
     "learning_rate":     [0.03, 0.05, 0.1, 0.15],
     "num_leaves":        [31, 63, 127, 255],
     "max_depth":         [-1, 7, 10, 15],
-    # lower floor: tail classes may have only ~10-30 samples; 200 prevents any splits
     "min_child_samples": [5, 10, 20, 50],
     "min_child_weight":  [1e-3, 1e-2, 1e-1, 1.0],
-    # small gains are legitimate on rare classes; cap at 0.1 not 1.0
     "min_split_gain":    [0.0, 0.01, 0.05, 0.1],
-    # subsample_freq=1 activates row subsampling (without it, subsample has no effect)
     "subsample":         [0.7, 0.8, 0.9, 1.0],
     "subsample_freq":    [1],
-    # raised floor: at ~1% feature density, 0.3 column sampling leaves most nodes
-    # with near-zero signal; 0.5 is the practical minimum
     "colsample_bytree":  [0.5, 0.7, 0.9, 1.0],
     "reg_alpha":         [0.0, 0.1, 0.5, 1.0],
     "reg_lambda":        [0.0, 0.1, 1.0, 5.0],
@@ -48,35 +42,40 @@ def train_and_evaluate(
     cv_folds: int,
     n_iter: int,
     param_space: dict,
-    min_samples: int = 10,
+    min_samples: int = 20,
     weight_cap_factors: list[float] | None = None,
+    optuna_jobs: int = 4,
+    lgbm_threads: int = 4,
     seed: int = 42,
 ) -> tuple[LGBMClassifier, dict]:
-    # drop classes with fewer than min_samples; they can't support stratified CV
-    # and would destabilise sample weights if kept
+    # remap classes with fewer than min_samples to "Other" so no samples are discarded
     class_counts = np.bincount(y, minlength=len(class_names))
-    large_mask = np.array([class_counts[yi] >= min_samples for yi in y])
+    small_set = {i for i in range(len(class_names)) if 0 < class_counts[i] < min_samples}
 
-    X_large, y_large = X[large_mask], y[large_mask]
+    y_remapped = y.copy()
+    class_names_remapped = list(class_names)
 
-    dropped = [class_names[i] for i in range(len(class_names)) if 0 < class_counts[i] < min_samples]
-    if dropped:
-        print(f"  {len(dropped)} ERN class(es) with < {min_samples} samples excluded: {', '.join(dropped)}")
+    if small_set:
+        if "Other" not in class_names_remapped:
+            class_names_remapped.append("Other")
+        other_idx = class_names_remapped.index("Other")
+        y_remapped = np.where(np.isin(y_remapped, list(small_set)), other_idx, y_remapped)
 
-    if X_large.shape[0] == 0:
-        sys.exit("[error] No ERN class has enough samples for stratified CV.")
+    if X.shape[0] == 0:
+        sys.exit("No samples available for training.")
 
     # stratified train/test split
     X_train, X_test, y_train, y_test = train_test_split(
-        X_large, y_large, test_size=test_size, stratify=y_large, random_state=seed
+        X, y_remapped, test_size=test_size, stratify=y_remapped, random_state=seed
     )
     X_cv, y_cv = X_train, y_train
 
-    # balanced base weights; cap factor is tuned by Optuna
-    large_counts = np.bincount(y_large, minlength=len(class_names))
+    # balanced base weights due to class imbalance
+    remapped_counts = np.bincount(y_remapped, minlength=len(class_names_remapped))
+    safe_counts = np.where(remapped_counts > 0, remapped_counts, 1).astype(float)
     raw_w = np.where(
-        large_counts > 0,
-        len(y_large) / (len(class_names) * large_counts.astype(float)),
+        remapped_counts > 0,
+        len(y_remapped) / (len(class_names_remapped) * safe_counts),
         0.0,
     )
     median_raw_w = float(np.median(raw_w[raw_w > 0]))
@@ -84,11 +83,13 @@ def train_and_evaluate(
 
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
 
+    # Optuna min/maxes the objective function for CV F1 macro
     def objective(trial: optuna.Trial) -> float:
         wcf = trial.suggest_categorical("weight_cap_factor", _wcf_choices)
         sw_trial = np.minimum(raw_w, median_raw_w * wcf)[y_train]
         params = {k: trial.suggest_categorical(k, v) for k, v in param_space.items()}
         fold_acc, fold_f1m, fold_f1w, best_iters = [], [], [], []
+
         for train_idx, val_idx in cv.split(X_cv, y_cv):
             X_tr, X_val = X_cv[train_idx], X_cv[val_idx]
             y_tr, y_val = y_cv[train_idx], y_cv[val_idx]
@@ -97,7 +98,7 @@ def train_and_evaluate(
                 importance_type="gain",
                 random_state=seed,
                 verbose=-1,
-                n_jobs=-1,
+                n_jobs=lgbm_threads,
                 n_estimators=1000,
                 **params,
             )
@@ -115,14 +116,18 @@ def train_and_evaluate(
             fold_acc.append(accuracy_score(y_val, y_pred))
             fold_f1m.append(f1_score(y_val, y_pred, average="macro", zero_division=0))
             fold_f1w.append(f1_score(y_val, y_pred, average="weighted", zero_division=0))
+
+        # store scores in Optuna trial
         trial.set_user_attr("fold_accuracy", fold_acc)
         trial.set_user_attr("fold_f1_macro", fold_f1m)
         trial.set_user_attr("fold_f1_weighted", fold_f1w)
         trial.set_user_attr("mean_best_iter", int(np.mean(best_iters)))
+
         return float(np.mean(fold_f1m))
 
     width = len(str(n_iter))
 
+    # callback to show training progress
     def _log_trial(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         improved = trial.value == study.best_value
         marker = " *" if improved else ""
@@ -134,14 +139,12 @@ def train_and_evaluate(
             f"  trees={trees}"
         )
 
-    print(f"Optuna TPE search: {n_iter} trials x {cv_folds}-fold CV...")
+    print(f"Optuna TPE search: {n_iter} trials x {cv_folds}-fold CV ({optuna_jobs} parallel trials, {lgbm_threads} threads each).")
     study = optuna.create_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=seed),
     )
-    # n_jobs=1: trials run sequentially
-    # LightGBM's internal thread pool is initialised concurrently across workers
-    study.optimize(objective, n_trials=n_iter, n_jobs=1, show_progress_bar=False, callbacks=[_log_trial])
+    study.optimize(objective, n_trials=n_iter, n_jobs=optuna_jobs, show_progress_bar=False, callbacks=[_log_trial])
 
     best_trial = study.best_trial
     best_params = dict(best_trial.params)
@@ -175,10 +178,11 @@ def train_and_evaluate(
     )
     model.fit(X_train, y_train, sample_weight=sw_train)
 
-    # evaluate on large-class test set
-    large_class_indices = sorted(set(y_large.tolist()))
-    eval_class_names = [class_names[i] for i in large_class_indices]
+    # evaluate on test set
+    large_class_indices = sorted(set(y_remapped.tolist()))
+    eval_class_names = [class_names_remapped[i] for i in large_class_indices]
     y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)
 
     report = classification_report(
         y_test, y_pred,
@@ -196,6 +200,10 @@ def train_and_evaluate(
         "report": report,
         "confusion_matrix": cm,
         "eval_class_names": eval_class_names,
+        "class_names_work": class_names_remapped,
+        "large_class_indices": large_class_indices,
+        "y_test": y_test,
+        "y_proba": y_proba,
         "accuracy": acc,
     }
 
@@ -219,7 +227,7 @@ def save_model_bundle(
     try:
         import joblib
     except ImportError:
-        print("[warn] joblib not installed: model bundle not saved.", file=sys.stderr)
+        print("[warn] joblib not installed: model not saved.", file=sys.stderr)
         return None
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,14 +243,14 @@ def save_results(
     plots_dir: Path,
     top_n: int,
 ) -> None:
-    from ml.plots import plot_confusion_matrix, plot_cv_scores, plot_feature_importances
+    from ml.plots import plot_confusion_matrix, plot_cv_scores, plot_feature_importances, plot_roc_curves
 
     cv = results["cv"]
     cm = results["confusion_matrix"]
     report = results["report"]
     eval_class_names = results["eval_class_names"]
 
-    # per-class metrics CSV
+    # class level metrics output csv
     report_rows = [
         {
             "ern": cls,
@@ -256,7 +264,6 @@ def save_results(
     ]
     metrics_path = data_dir / "ern_per_class_metrics.csv"
     pd.DataFrame(report_rows).to_csv(metrics_path, index=False)
-    print(f"Per-class metrics:            {metrics_path}")
     cm_path = data_dir / "ern_confusion_matrix.csv"
     pd.DataFrame(cm, index=eval_class_names, columns=eval_class_names).to_csv(cm_path)
     plot_confusion_matrix(cm, eval_class_names, plots_dir / "ern_confusion_matrix.png")
@@ -268,3 +275,12 @@ def save_results(
 
     # Cross-validation scores plot generation
     plot_cv_scores(cv, plots_dir / "ern_cv_scores.png")
+
+    # ROC curves
+    plot_roc_curves(
+        results["y_test"],
+        results["y_proba"],
+        results["large_class_indices"],
+        eval_class_names,
+        plots_dir / "ern_roc_curves.png",
+    )
