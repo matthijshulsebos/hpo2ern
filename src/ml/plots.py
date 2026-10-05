@@ -7,6 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.calibration import calibration_curve
 from sklearn.metrics import ConfusionMatrixDisplay, roc_curve, auc
 
 
@@ -60,6 +61,27 @@ def plot_cv_scores(cv_results: dict, output_path: Path) -> None:
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"CV score plot:                {output_path}")
+
+
+def plot_calibration(
+    correct: np.ndarray, conf_raw: np.ndarray, conf_cal: np.ndarray, output_path: Path
+) -> None:
+    fig, ax = plt.subplots(figsize=(6, 6))
+    for conf, label, color in [(conf_raw, "Raw", "tomato"), (conf_cal, "Calibrated", "steelblue")]:
+        frac_correct, mean_conf = calibration_curve(correct, conf, n_bins=10, strategy="quantile")
+        ax.plot(mean_conf, frac_correct, "o-", color=color, label=label)
+    ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.4, label="Perfectly calibrated")
+    ax.set_xlabel("Predicted confidence (top class)", fontsize=9)
+    ax.set_ylabel("Fraction correct", fontsize=9)
+    ax.set_title("Calibration curve (test set)", fontsize=11)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize=9)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Calibration plot:             {output_path}")
 
 
 def plot_roc_curves(

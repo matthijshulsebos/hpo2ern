@@ -160,7 +160,7 @@ def main() -> None:
 
         save_train_results(results, model, feature_names, data_dir, plots_dir, top_features)
 
-        bundle_path = save_model_bundle(model, vocabulary, le, path=model_path)
+        bundle_path = save_model_bundle(model, vocabulary, le, results["calibration"], path=model_path)
         if bundle_path:
             print(f"  Model bundle  : {bundle_path}")
 

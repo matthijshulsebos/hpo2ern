@@ -11,6 +11,14 @@ from scipy.sparse import csr_matrix
 from utils.phenopackets import Sample, is_unlabeled
 
 
+def calibrate_proba(proba: np.ndarray, log_w: np.ndarray, temperature: float) -> np.ndarray:
+    # divide out the class weights used in training, then temperature-scale the logits
+    logits = (np.log(np.clip(proba, 1e-12, 1.0)) - log_w) / temperature
+    logits -= logits.max(axis=1, keepdims=True)
+    p = np.exp(logits)
+    return p / p.sum(axis=1, keepdims=True)
+
+
 # this is here because it is a mandatory processing step before inferencing
 def build_predict_feature_matrix(
     samples: list[Sample],
@@ -80,8 +88,12 @@ def predict_and_save(
     y_pred = model.predict(X)
     proba = model.predict_proba(X)
     ern_pred = le.inverse_transform(y_pred)
-    # probability of the top predicted class
-    confidence = proba.max(axis=1)
+    if "calibration" in bundle:
+        proba = calibrate_proba(proba, bundle["calibration"]["log_w"], bundle["calibration"]["temperature"])
+    else:
+        print("[warn] model bundle has no calibration: confidence is uncalibrated, retrain to fix.", file=sys.stderr)
+    # calibrated probability that the predicted ERN is right
+    confidence = proba[np.arange(len(y_pred)), np.searchsorted(model.classes_, y_pred)]
 
     df = pd.DataFrame({
         "sample": [s.name for s in predict_samples],

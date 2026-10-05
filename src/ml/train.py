@@ -8,10 +8,13 @@ import numpy as np
 import optuna
 import pandas as pd
 from lightgbm import LGBMClassifier
+from scipy.optimize import minimize_scalar
 from scipy.sparse import csr_matrix
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder
+
+from ml.predict import calibrate_proba
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -178,6 +181,30 @@ def train_and_evaluate(
     )
     model.fit(X_train, y_train, sample_weight=sw_train)
 
+    # calibration: undo the class-weight prior shift, then fit one temperature on
+    # out-of-fold probabilities so the test set stays untouched
+    log_w = np.log(np.minimum(raw_w, median_raw_w * best_wcf)[model.classes_])
+    oof = np.zeros((len(y_train), len(model.classes_)))
+    for train_idx, val_idx in cv.split(X_train, y_train):
+        m = LGBMClassifier(
+            importance_type="gain",
+            random_state=seed,
+            verbose=-1,
+            n_jobs=-1,
+            n_estimators=best_iter,
+            **best_params,
+        )
+        m.fit(X_train[train_idx], y_train[train_idx], sample_weight=sw_train[train_idx])
+        oof[val_idx] = m.predict_proba(X_train[val_idx])
+    train_cols = np.searchsorted(model.classes_, y_train)
+    temperature = minimize_scalar(
+        lambda t: -np.mean(np.log(calibrate_proba(oof, log_w, t)[np.arange(len(y_train)), train_cols])),
+        bounds=(0.05, 20.0),
+        method="bounded",
+    ).x
+    calibration = {"log_w": log_w, "temperature": float(temperature)}
+    print(f"Calibration temperature: {temperature:.3f}")
+
     # evaluate on test set
     large_class_indices = sorted(set(y_remapped.tolist()))
     eval_class_names = [class_names_remapped[i] for i in large_class_indices]
@@ -194,6 +221,16 @@ def train_and_evaluate(
     cm = confusion_matrix(y_test, y_pred, labels=large_class_indices)
     acc = accuracy_score(y_test, y_pred)
 
+    # top-class confidence before/after calibration on the test set
+    rows = np.arange(len(y_test))
+    pred_cols = np.searchsorted(model.classes_, y_pred)
+    test_cols = np.searchsorted(model.classes_, y_test)
+    y_proba_cal = calibrate_proba(y_proba, log_w, temperature)
+    print(
+        f"Test log loss raw / calibrated: {-np.mean(np.log(np.clip(y_proba[rows, test_cols], 1e-12, 1))):.3f}"
+        f" / {-np.mean(np.log(y_proba_cal[rows, test_cols])):.3f}"
+    )
+
     return model, {
         "best_params": best_params,
         "cv": cv_fold_scores,
@@ -205,6 +242,10 @@ def train_and_evaluate(
         "y_test": y_test,
         "y_proba": y_proba,
         "accuracy": acc,
+        "calibration": calibration,
+        "test_correct": y_pred == y_test,
+        "test_conf_raw": y_proba[rows, pred_cols],
+        "test_conf_cal": y_proba_cal[rows, pred_cols],
     }
 
 
@@ -222,6 +263,7 @@ def save_model_bundle(
     model: LGBMClassifier,
     vocabulary: list[str],
     le: LabelEncoder,
+    calibration: dict,
     path: Path = DEFAULT_MODEL_PATH,
 ) -> "Path | None":
     try:
@@ -231,7 +273,10 @@ def save_model_bundle(
         return None
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"model": model, "vocabulary": vocabulary, "label_encoder": le}, path)
+    joblib.dump(
+        {"model": model, "vocabulary": vocabulary, "label_encoder": le, "calibration": calibration},
+        path,
+    )
     return path
 
 
@@ -243,7 +288,7 @@ def save_results(
     plots_dir: Path,
     top_n: int,
 ) -> None:
-    from ml.plots import plot_confusion_matrix, plot_cv_scores, plot_feature_importances, plot_roc_curves
+    from ml.plots import plot_calibration, plot_confusion_matrix, plot_cv_scores, plot_feature_importances, plot_roc_curves
 
     cv = results["cv"]
     cm = results["confusion_matrix"]
@@ -275,6 +320,14 @@ def save_results(
 
     # Cross-validation scores plot generation
     plot_cv_scores(cv, plots_dir / "ern_cv_scores.png")
+
+    # calibration curve of top-class confidence
+    plot_calibration(
+        results["test_correct"],
+        results["test_conf_raw"],
+        results["test_conf_cal"],
+        plots_dir / "ern_calibration.png",
+    )
 
     # ROC curves
     plot_roc_curves(
