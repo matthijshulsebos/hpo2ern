@@ -12,6 +12,8 @@ from tqdm import tqdm
 
 
 _UNLABELED_VALUES = {"", "unknown", "not applicable", "not_applicable"}
+# labels whose samples are dropped from the analysis entirely
+_EXCLUDED_ERNS = {"udn-spain"}
 
 
 def is_unlabeled(ern: str) -> bool:
@@ -60,6 +62,7 @@ def load_all_phenopackets(phenopacket_dir: Path) -> list[Sample]:
     seen_ids: set[str] = set()
     n_skipped = 0
     n_dupes = 0
+    n_excluded = 0
     for f in files:
         phenopacket_id, terms, submitter, ern = load_phenopacket(f)
         if phenopacket_id in seen_ids:
@@ -71,6 +74,9 @@ def load_all_phenopackets(phenopacket_dir: Path) -> list[Sample]:
             print(f"[skip] {f.name}: no observed HPO terms", file=sys.stderr)
             n_skipped += 1
             continue
+        if ern.strip().lower() in _EXCLUDED_ERNS:
+            n_excluded += 1
+            continue
         samples.append(Sample(name=phenopacket_id, terms=terms, submitter=submitter, ern=ern))
 
     suffix = ""
@@ -78,6 +84,8 @@ def load_all_phenopackets(phenopacket_dir: Path) -> list[Sample]:
         suffix += f", {n_dupes} duplicate IDs skipped"
     if n_skipped:
         suffix += f", {n_skipped} skipped (no HPO terms)"
+    if n_excluded:
+        suffix += f", {n_excluded} excluded (ERN in {sorted(_EXCLUDED_ERNS)})"
     print(f"Loaded {len(samples)} phenopackets{suffix}")
     return samples
 
@@ -91,7 +99,7 @@ def validate_terms(samples: list[Sample]) -> list[Sample]:
             try:
                 Ontology.get_hpo_object(t)
                 ok.append(t)
-            except RuntimeError:
+            except (RuntimeError, ValueError):
                 print(f"[warn] {sample.name}: unknown term {t!r} skipped", file=sys.stderr)
         if not ok:
             print(f"[skip] {sample.name}: no valid HPO terms after ontology check", file=sys.stderr)
@@ -118,7 +126,7 @@ def build_ancestry_matrix(samples: list[Sample]) -> tuple[csr_matrix, list[str]]
                 term_set.add(hpo_term.id)
                 for ancestor in hpo_term.all_parents:
                     term_set.add(ancestor.id)
-            except RuntimeError:
+            except (RuntimeError, ValueError):
                 pass
         patient_sets.append(term_set)
         vocab.update(term_set)
