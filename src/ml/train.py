@@ -48,7 +48,7 @@ def train_and_evaluate(
     lgbm_threads: int = 4,
     seed: int = 42,
 ) -> tuple[LGBMClassifier, dict]:
-    # remap classes with fewer than min_samples to "Other" so no samples are discarded
+    # remap classes with fewer than min_samples to "Not available" so no samples are discarded
     class_counts = np.bincount(y, minlength=len(class_names))
     small_set = {i for i in range(len(class_names)) if 0 < class_counts[i] < min_samples}
 
@@ -56,9 +56,9 @@ def train_and_evaluate(
     class_names_remapped = list(class_names)
 
     if small_set:
-        if "Other" not in class_names_remapped:
-            class_names_remapped.append("Other")
-        other_idx = class_names_remapped.index("Other")
+        if "Not available" not in class_names_remapped:
+            class_names_remapped.append("Not available")
+        other_idx = class_names_remapped.index("Not available")
         y_remapped = np.where(np.isin(y_remapped, list(small_set)), other_idx, y_remapped)
 
     if X.shape[0] == 0:

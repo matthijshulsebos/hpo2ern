@@ -86,7 +86,7 @@ def plot_roc_curves(
         None,
     )
     other_col = next(
-        (col for col, cn in enumerate(class_names) if cn == "Other"),
+        (col for col, cn in enumerate(class_names) if cn == "Not available"),
         None,
     )
     named_cols = [col for col in roc_auc if col != other_col and col != ithaca_col]
@@ -127,7 +127,7 @@ def plot_roc_curves(
     # other with optimal threshold marker
     if other_col is not None and other_col in roc_auc:
         ax.plot(fpr[other_col], tpr[other_col], lw=2.5, color="goldenrod",
-                label=f"Other / rare ERNs (AUC={roc_auc[other_col]:.3f})")
+                label=f"Not available / rare ERNs (AUC={roc_auc[other_col]:.3f})")
         _mark_youden(other_col, "goldenrod")
 
     ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.4)

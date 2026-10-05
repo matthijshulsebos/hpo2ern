@@ -154,9 +154,9 @@ def main() -> None:
         print(f"  Test accuracy : {results['accuracy']:.4f}")
         print(f"  Test F1 macro : {results['report']['macro avg']['f1-score']:.4f}")
 
-        # patch le to include "Other" if small classes were relabeled during training
-        if "Other" in results["class_names_remapped"]:
-            le.classes_ = np.append(le.classes_, "Other")
+        # patch le to include "Not available" if small classes were relabeled during training
+        if "Not available" in results["class_names_remapped"]:
+            le.classes_ = np.append(le.classes_, "Not available")
 
         save_train_results(results, model, feature_names, data_dir, plots_dir, top_features)
 
