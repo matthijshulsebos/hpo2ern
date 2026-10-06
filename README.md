@@ -35,7 +35,7 @@ Input is a directory of [Phenopacket](https://phenopacket-schema.readthedocs.io/
 
 Each HPO term is propagated to all its ancestors using the HPO ontology, producing a binary feature vector per patient (1 = term or ancestor present, 0 = absent). This captures semantic similarity between patients even when different but related terms were recorded.
 
-ERN classes with fewer than `min_samples` (default: 20) samples are merged into a single **Not available** class rather than dropped. This means the model can predict `Not available` for patients who likely belong to a rare or underrepresented ERN, which are then flagged for human review. The `confidence` column in the prediction output gives the calibrated probability that the predicted ERN is correct.
+ERN classes with fewer than `min_samples` (default: 20) samples are merged into a single **Not available** class rather than dropped. This means the model can predict `Not available` for patients who likely belong to a rare or underrepresented ERN, which are then flagged for human review. The prediction output gives the probability of the predicted ERN twice: `confidence_raw` straight from the model and `confidence_calibrated` after calibration.
 
 ### Training process
 

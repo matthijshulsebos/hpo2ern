@@ -88,12 +88,15 @@ def predict_and_save(
     y_pred = model.predict(X)
     proba = model.predict_proba(X)
     ern_pred = le.inverse_transform(y_pred)
+    # probability of the predicted ERN, raw and calibrated
+    pred_idx = (np.arange(len(y_pred)), np.searchsorted(model.classes_, y_pred))
+    confidence_raw = proba[pred_idx]
     if "calibration" in bundle:
-        proba = calibrate_proba(proba, bundle["calibration"]["log_w"], bundle["calibration"]["temperature"])
+        proba_cal = calibrate_proba(proba, bundle["calibration"]["log_w"], bundle["calibration"]["temperature"])
+        confidence_cal = proba_cal[pred_idx]
     else:
-        print("[warn] model bundle has no calibration: confidence is uncalibrated, retrain to fix.", file=sys.stderr)
-    # calibrated probability that the predicted ERN is right
-    confidence = proba[np.arange(len(y_pred)), np.searchsorted(model.classes_, y_pred)]
+        print("[warn] model bundle has no calibration, retrain to get calibrated confidence.", file=sys.stderr)
+        confidence_cal = np.full(len(y_pred), np.nan)
 
     df = pd.DataFrame({
         "sample": [s.name for s in predict_samples],
@@ -101,7 +104,8 @@ def predict_and_save(
         "current_ern": [s.ern for s in predict_samples],
         "ern_was_missing": [is_unlabeled(s.ern) for s in predict_samples],
         "predicted_ern": ern_pred,
-        "confidence": confidence.round(4),
+        "confidence_raw": confidence_raw.round(4),
+        "confidence_calibrated": confidence_cal.round(4),
     })
     df.to_csv(output_path, index=False)
     print(f"Predictions saved:  {output_path}")
