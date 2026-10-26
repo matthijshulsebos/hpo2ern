@@ -160,7 +160,10 @@ def main() -> None:
 
         save_train_results(results, model, feature_names, data_dir, plots_dir, top_features)
 
-        bundle_path = save_model_bundle(model, vocabulary, le, results["calibration"], path=model_path)
+        # sample name -> "train" / "test", so predict can report each sample's cohort
+        cohorts = {labeled[i].name: "train" for i in results["train_idx"]}
+        cohorts.update({labeled[i].name: "test" for i in results["test_idx"]})
+        bundle_path = save_model_bundle(model, vocabulary, le, results["calibration"], cohorts, path=model_path)
         if bundle_path:
             print(f"  Model bundle  : {bundle_path}")
 

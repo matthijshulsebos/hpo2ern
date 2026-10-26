@@ -68,8 +68,8 @@ def train_and_evaluate(
         sys.exit("No samples available for training.")
 
     # stratified train/test split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_remapped, test_size=test_size, stratify=y_remapped, random_state=seed
+    X_train, X_test, y_train, y_test, sample_train_idx, sample_test_idx = train_test_split(
+        X, y_remapped, np.arange(len(y_remapped)), test_size=test_size, stratify=y_remapped, random_state=seed
     )
     X_cv, y_cv = X_train, y_train
 
@@ -242,6 +242,8 @@ def train_and_evaluate(
         "y_test": y_test,
         "y_proba": y_proba,
         "accuracy": acc,
+        "train_idx": sample_train_idx,
+        "test_idx": sample_test_idx,
         "calibration": calibration,
         "test_correct": y_pred == y_test,
         "test_conf_raw": y_proba[rows, pred_cols],
@@ -264,6 +266,7 @@ def save_model_bundle(
     vocabulary: list[str],
     le: LabelEncoder,
     calibration: dict,
+    cohorts: dict[str, str],
     path: Path = DEFAULT_MODEL_PATH,
 ) -> "Path | None":
     try:
@@ -274,7 +277,7 @@ def save_model_bundle(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
-        {"model": model, "vocabulary": vocabulary, "label_encoder": le, "calibration": calibration},
+        {"model": model, "vocabulary": vocabulary, "label_encoder": le, "calibration": calibration, "cohorts": cohorts},
         path,
     )
     return path

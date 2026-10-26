@@ -69,6 +69,7 @@ def predict_and_save(
     model = bundle["model"]
     vocabulary: list[str] = bundle["vocabulary"]
     le = bundle["label_encoder"]
+    cohorts: dict[str, str] | None = bundle.get("cohorts")
 
     if missing_only:
         predict_samples = [s for s in samples if is_unlabeled(s.ern)]
@@ -103,6 +104,13 @@ def predict_and_save(
         "submitter": [s.submitter for s in predict_samples],
         "current_ern": [s.ern for s in predict_samples],
         "ern_was_missing": [is_unlabeled(s.ern) for s in predict_samples],
+        # none = no ERN label, not used = labelled but not in this model's training data
+        "cohort": [
+            "none" if is_unlabeled(s.ern)
+            else "unknown" if cohorts is None
+            else cohorts.get(s.name, "not used")
+            for s in predict_samples
+        ],
         "predicted_ern": ern_pred,
         "confidence_raw": confidence_raw.round(4),
         "confidence_calibrated": confidence_cal.round(4),
